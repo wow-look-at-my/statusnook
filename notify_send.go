@@ -166,7 +166,7 @@ func sendMonitorAlertEmail(
 
 	msg = append(msg, []byte(emailStr))
 
-	err = smtp.SendMail(
+	err = sendMail(
 		smtpDetail.Host+":"+strconv.Itoa(smtpDetail.Port),
 		smtpAuth,
 		smtpDetail.From,

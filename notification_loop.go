@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/smtp"
 	"strconv"
 	"strings"
 	"sync"
@@ -357,7 +356,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 							msg = append(msg, []byte(emailStr))
 
-							err = smtp.SendMail(
+							err = sendMail(
 								smtpDetail.Host+":"+strconv.Itoa(smtpDetail.Port),
 								PlainOrLoginAuth(
 									smtpDetail.Username,

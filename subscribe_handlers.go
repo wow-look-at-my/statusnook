@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/mail"
-	"net/smtp"
 	"strconv"
 	"strings"
 	"time"
@@ -315,7 +314,7 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 
 	msg = append(msg, []byte(emailStr))
 
-	err = smtp.SendMail(
+	err = sendMail(
 		smtpDetail.Host+":"+strconv.Itoa(smtpDetail.Port),
 		PlainOrLoginAuth(
 			smtpDetail.Username,
