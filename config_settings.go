@@ -70,6 +70,9 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only whether a credential exists is sent to the browser. Rendering the
+	// token and webhook secret into the page put them in the page source, in
+	// the browser's form history and in any screen share of this page.
 	githubToken, err := getMetaValue(tx, "githubConfigToken")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Printf("getConfigSettings.getMetaValueGitHubConfigToken %s", err)
@@ -110,8 +113,31 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 				<p style="font-size: 1.6rem; margin-bottom: 4.6rem;">
 					Configure how your Statusnook configuration is managed
 				</p>
+
+				{{if .EnvManaged}}
+					<div class="alert" style="display: block; margin-bottom: 4.6rem;">
+						<p>
+							This instance reads its configuration from
+							<strong>{{.GitHubRepoURL}}</strong> ({{.EnvBranch}}),
+							path <strong>{{.GitHubConfigPath}}</strong>,
+							set through the environment.
+						</p>
+						<p>
+							{{if .EnvPollInterval}}
+								Polled every {{.EnvPollInterval}}.
+							{{else}}
+								Polling is disabled; updates arrive by webhook only.
+							{{end}}
+						</p>
+						<p>
+							Change STATUSNOOK_GITHUB_* in your container environment to
+							point somewhere else. These settings cannot be edited here.
+						</p>
+					</div>
+				{{end}}
 				
 				<form hx-post hx-swap="none" autocomplete="off">
+					<fieldset style="border: 0; padding: 0; margin: 0;" {{if .EnvManaged}}disabled{{end}}>
 					<label>
 						Text-based config				
 						<span class="subtext">
@@ -235,7 +261,16 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 							<span class="subtext">
 								Paste a personal access token with Contents read-only permission
 							</span>
-							<input name="github-token" type="password" value="{{.GitHubToken}}" required>
+							<input
+								name="github-token"
+								type="password"
+								autocomplete="new-password"
+								{{if .GitHubTokenSet}}
+									placeholder="Unchanged - paste a new token to replace it"
+								{{else}}
+									required
+								{{end}}
+							>
 						</label>
 
 						<label>
@@ -251,8 +286,12 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 									id="github-webhook-secret"
 									name="github-webhook-secret"
 									type="password"
-									value="{{.GitHubWebhookSecret}}"
-									required
+									autocomplete="new-password"
+									{{if .GitHubWebhookSecretSet}}
+										placeholder="Unchanged - generate or paste to replace it"
+									{{else}}
+										required
+									{{end}}
 								>
 								<button 
 									type="button"
@@ -402,9 +441,13 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 						</div>
 					</fieldset>
 					
-					<div>
-						<button type="submit">Confirm</button>
-					</div>
+					</fieldset>
+
+					{{if not .EnvManaged}}
+						<div>
+							<button type="submit">Confirm</button>
+						</div>
+					{{end}}
 				</form>
 
 				<dialog class="modal generate-new-webhook-secret" id="generate-new-webhook-secret">
@@ -434,26 +477,37 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	envPollInterval := ""
+	if env.GitHub.PollInterval > 0 {
+		envPollInterval = env.GitHub.PollInterval.String()
+	}
+
 	err = tmpl.Execute(w, struct {
-		ConfigFile          bool
-		GitHubManagedConfig bool
-		GitHubRepoURL       string
-		GitHubConfigBranch  string
-		GitHubConfigPath    string
-		GitHubToken         string
-		GitHubWebhookSecret string
-		Domain              string
-		Ctx                 pageCtx
+		ConfigFile             bool
+		GitHubManagedConfig    bool
+		GitHubRepoURL          string
+		GitHubConfigBranch     string
+		GitHubConfigPath       string
+		GitHubTokenSet         bool
+		GitHubWebhookSecretSet bool
+		EnvManaged             bool
+		EnvBranch              string
+		EnvPollInterval        string
+		Domain                 string
+		Ctx                    pageCtx
 	}{
-		ConfigFile:          configFile,
-		GitHubManagedConfig: githubManagedConfig,
-		GitHubRepoURL:       githubRepoURL,
-		GitHubConfigBranch:  githubBranch,
-		GitHubConfigPath:    githubFilePath,
-		GitHubToken:         githubToken,
-		GitHubWebhookSecret: githubWebhookSecret,
-		Domain:              metaDomain,
-		Ctx:                 getPageCtx(r),
+		ConfigFile:             configFile,
+		GitHubManagedConfig:    githubManagedConfig,
+		GitHubRepoURL:          githubRepoURL,
+		GitHubConfigBranch:     githubBranch,
+		GitHubConfigPath:       githubFilePath,
+		GitHubTokenSet:         githubToken != "" || env.GitHub.Managed(),
+		GitHubWebhookSecretSet: githubWebhookSecret != "",
+		EnvManaged:             env.GitHub.Managed(),
+		EnvBranch:              branchLabel(env.GitHub.Branch),
+		EnvPollInterval:        envPollInterval,
+		Domain:                 metaDomain,
+		Ctx:                    getPageCtx(r),
 	})
 	if err != nil {
 		log.Printf("getConfigSettings.Execute: %s", err)

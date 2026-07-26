@@ -1,0 +1,70 @@
+# Statusnook on a NAS or any Docker host, with its configuration read from a
+# private GitHub repository.
+#
+# 1. cp .env.example .env, then fill in .env
+# 2. docker compose up -d
+# 3. open http://<host>:8000 and log in with STATUSNOOK_ADMIN_USERNAME/PASSWORD
+#
+# See docs/deployment.md for every setting and for the token's permissions.
+
+services:
+  statusnook:
+    image: goksan/statusnook
+    # Build the image from this checkout instead of pulling it:
+    # build: .
+    container_name: statusnook
+    restart: unless-stopped
+    ports:
+      # Reachable from the LAN. Put a reverse proxy in front for TLS and
+      # change this to 127.0.0.1:8000:8000.
+      - "8000:8000"
+    environment:
+      # --- status page ---------------------------------------------------
+      STATUSNOOK_NAME: ${STATUSNOOK_NAME:-Statusnook}
+      # Public hostname used in notification links. Optional.
+      STATUSNOOK_DOMAIN: ${STATUSNOOK_DOMAIN:-}
+      # "off" (default) serves plain HTTP for a reverse proxy. "auto" gets
+      # Let's Encrypt certificates and needs ports 80 and 443 published.
+      STATUSNOOK_TLS: ${STATUSNOOK_TLS:-off}
+      # Set to true only when a reverse proxy sets X-Forwarded-Proto/For.
+      STATUSNOOK_TRUST_PROXY: ${STATUSNOOK_TRUST_PROXY:-false}
+
+      # --- admin account, created on first start ------------------------
+      STATUSNOOK_ADMIN_USERNAME: ${STATUSNOOK_ADMIN_USERNAME:?set it in .env}
+      STATUSNOOK_ADMIN_PASSWORD: ${STATUSNOOK_ADMIN_PASSWORD:?set it in .env}
+
+      # --- configuration from a private GitHub repository ---------------
+      # owner/name, or the repository URL.
+      STATUSNOOK_GITHUB_REPO: ${STATUSNOOK_GITHUB_REPO:?set it in .env}
+      # Empty means the repository's default branch.
+      STATUSNOOK_GITHUB_BRANCH: ${STATUSNOOK_GITHUB_BRANCH:-}
+      STATUSNOOK_GITHUB_CONFIG_PATH: ${STATUSNOOK_GITHUB_CONFIG_PATH:-statusnook.yaml}
+      # Fine-grained PAT, read-only "Contents" on that one repository.
+      # Prefer the _FILE form below to keep it out of the environment.
+      STATUSNOOK_GITHUB_TOKEN: ${STATUSNOOK_GITHUB_TOKEN:-}
+      # STATUSNOOK_GITHUB_TOKEN_FILE: /run/secrets/statusnook_github_token
+      # How often the repository is polled. Polling is what makes this work
+      # from a home network: GitHub never has to reach in.
+      STATUSNOOK_GITHUB_POLL_INTERVAL: ${STATUSNOOK_GITHUB_POLL_INTERVAL:-60s}
+      # Optional: also accept push webhooks, if this host is reachable from
+      # GitHub. Polling alone is enough.
+      # STATUSNOOK_GITHUB_WEBHOOK_SECRET_FILE: /run/secrets/statusnook_webhook_secret
+    volumes:
+      # Database, secret key and certificates. Keep this.
+      - statusnook-data:/app/statusnook-data
+    # A bind mount instead of the named volume needs a matching uid:gid, e.g.
+    #   volumes:
+    #     - /volume1/docker/statusnook:/app/statusnook-data
+    #   user: "1000:1000"
+
+    # Uncomment together with the *_FILE variables above.
+    # secrets:
+    #   - statusnook_github_token
+
+# secrets:
+#   statusnook_github_token:
+#     file: ./secrets/github_token
+
+volumes:
+  statusnook-data:
+    name: statusnook-data

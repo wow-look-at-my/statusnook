@@ -4,7 +4,15 @@ By default, you can configure your Statusnook instance through the standard web 
 
 Through the settings page, you can opt for an exclusively text-based configuration. This disables elements of the standard interface and allows you to manage the configuration via text.
 
-Additionally, you can set opt for updates to be managed solely through GitHub, enabling automatic synchronisation with your Statusnook instance on pushes to a chosen branch.
+Additionally, the configuration can be managed entirely from a GitHub
+repository - including a private one. Statusnook polls the file and applies each
+new revision, so it works from a network GitHub cannot reach; a push webhook is
+optional and only makes the update immediate. Point an instance at a repository
+through the environment (`STATUSNOOK_GITHUB_*`, see
+[deployment.md](deployment.md)) or through the settings page.
+
+When the repository is configured through the environment, the config editor and
+the config settings page are read-only: the repository is the source of truth.
 
 
 > [!CAUTION]
@@ -142,3 +150,7 @@ Secrets can be encrypted and decrypted via the settings page.
 
 When Statusnook is applying a configuration it attempts to decrypt and replace any value prefixed with `secret_`.
 
+When a revision fails to apply, the previous configuration keeps running and the
+problems are recorded on the settings page and in the log. Secrets are decrypted
+with a key stored in the data directory, so a config file committed to a
+repository is only usable by the instance that encrypted it.

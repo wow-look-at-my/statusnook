@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -44,9 +45,28 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if githubManaged {
+		// The form never renders the stored credentials, so a blank field
+		// means "keep what is already saved".
+		stored, err := storedGitHubCredentials()
+		if err != nil {
+			log.Printf("postConfigSettings.storedGitHubCredentials: %s", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if githubToken == "" {
+			githubToken = stored.token
+		}
+		if githubWebhookSecret == "" {
+			githubWebhookSecret = stored.webhookSecret
+		}
+
 		if githubRepoURL == "" || githubBranch == "" || githubConfigPath == "" ||
 			githubToken == "" || githubWebhookSecret == "" {
 			w.WriteHeader(http.StatusBadRequest)
+			w.Write(alertOOB(
+				"Repository URL, branch, config path, token and webhook secret are all required",
+			))
 			return
 		}
 	}
@@ -147,6 +167,36 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 	metaConfigFileEnabled = configFile
 
 	w.Header().Add("HX-Location", "/admin/settings")
+}
+
+type gitHubCredentials struct {
+	token         string
+	webhookSecret string
+}
+
+// storedGitHubCredentials reads the credentials already saved for the GitHub
+// managed config.
+func storedGitHubCredentials() (gitHubCredentials, error) {
+	creds := gitHubCredentials{}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return creds, fmt.Errorf("storedGitHubCredentials.Begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	for name, target := range map[string]*string{
+		"githubConfigToken":         &creds.token,
+		"githubConfigWebhookSecret": &creds.webhookSecret,
+	} {
+		value, err := getMetaValue(tx, name)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return creds, fmt.Errorf("storedGitHubCredentials.%s: %w", name, err)
+		}
+		*target = value
+	}
+
+	return creds, nil
 }
 
 // gitHubSetupMessage explains a failed connection attempt in terms of the field

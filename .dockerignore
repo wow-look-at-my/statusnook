@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+build/
+bin/
+docs/
+packer/
+statusnook-data/
+certmagic/
+*.db
+*.db-*
+*_test.go
+Dockerfile
+docker-compose.yml
+README.md

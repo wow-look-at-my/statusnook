@@ -30,3 +30,5 @@ statusnook_linux_*
 certmagic
 build/
 coverage.out
+
+.env

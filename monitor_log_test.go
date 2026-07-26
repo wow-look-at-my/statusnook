@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// openTestDB opens a database with the sqlite3 driver the app registers.
+func openTestDB(dsn string) (*sql.DB, error) {
+	return sql.Open("sqlite3", dsn)
+}
+
 // testDB returns an empty in-memory database with the production schema.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()

@@ -33,31 +33,19 @@ curl -fsSL https://get.statusnook.com | sudo bash -s -- -port 8000
 
 ### Docker
 
-
-#### CLI
 ```
 docker run -d -p 127.0.0.1:8000:8000 -v statusnook-data:/app/statusnook-data --restart always goksan/statusnook
 ```
 
-#### compose.yaml
+Or with Compose, keeping your monitors in a private GitHub repository:
 
 ```
-services:
-  statusnook:
-    ports:
-      - 127.0.0.1:8000:8000
-    volumes:
-      - statusnook-data:/app/statusnook-data
-    restart: always
-    image: goksan/statusnook
-volumes:
-  statusnook-data:
-    name: statusnook-data
+cp .env.example .env    # admin credentials, repo, read-only PAT
+docker compose up -d
 ```
 
-```
-docker compose up
-```
+Statusnook polls the repository, so nothing has to reach into your network -
+handy on a NAS. [Deployment guide](docs/deployment.md).
 
 ### One-click cloud templates
 <a href="https://marketplace.digitalocean.com/apps/statusnook"><img width="200px" src="https://www.deploytodo.com/do-btn-blue-ghost.svg" alt="Deploy to DO" width="150px"></a>
@@ -73,11 +61,13 @@ docker compose up
 amd64 and arm64 Linux binaries can be found on the [Releases](https://github.com/goksan/Statusnook/releases) page.
 
 ## Configuration
-Statusnook has the following configuration options:
-* Web UI based config
-* Text based config (YAML) via the settings page, or on push via GitHub
-  
-[Learn more about configuration](docs/configuration.md)
+Statusnook can be configured in three ways:
+* Web UI forms
+* Text based config (YAML) via the settings page
+* A YAML file in a GitHub repository, applied by polling or on push
+
+[Configuration format](docs/configuration.md) -
+[Deployment and environment variables](docs/deployment.md)
 
 ## Gallery
 

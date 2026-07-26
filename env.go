@@ -210,7 +210,15 @@ func normalizeRepo(v string) (string, error) {
 func envString(name string, fallback string) string {
 	v, ok := os.LookupEnv("STATUSNOOK_" + name)
 	if !ok {
-		return fallback
+		// PORT without the prefix is the convention on several hosting
+		// platforms, and it is what the pre-0.4 Docker image used.
+		if name == "PORT" {
+			if v, ok = os.LookupEnv("PORT"); !ok {
+				return fallback
+			}
+		} else {
+			return fallback
+		}
 	}
 
 	return strings.TrimSpace(v)
