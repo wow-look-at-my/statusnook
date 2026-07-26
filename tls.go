@@ -18,10 +18,54 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
+
+// Everything Statusnook persists lives under the data directory, so a single
+// Docker volume covers the database and the TLS material.
+
+// certmagicDir is where managed certificates are cached.
+func certmagicDir() string {
+	return filepath.Join(dataDir(), "certmagic")
+}
+
+func selfSignedCertPath() string {
+	return filepath.Join(dataDir(), SELF_SIGNED_CERT_NAME)
+}
+
+func selfSignedKeyPath() string {
+	return filepath.Join(dataDir(), SELF_SIGNED_KEY_NAME)
+}
+
+// migrateLegacyTLSPaths moves TLS material written next to the binary by older
+// versions into the data directory, once.
+func migrateLegacyTLSPaths() {
+	moves := map[string]string{
+		"certmagic":           certmagicDir(),
+		SELF_SIGNED_CERT_NAME: selfSignedCertPath(),
+		SELF_SIGNED_KEY_NAME:  selfSignedKeyPath(),
+	}
+
+	for legacy, target := range moves {
+		if legacy == target {
+			continue
+		}
+		if _, err := os.Stat(legacy); err != nil {
+			continue
+		}
+		if _, err := os.Stat(target); err == nil {
+			continue
+		}
+		if err := os.Rename(legacy, target); err != nil {
+			log.Printf("migrateLegacyTLSPaths %s: %s", legacy, err)
+			continue
+		}
+		log.Printf("moved %s to %s", legacy, target)
+	}
+}
 
 func attemptCertificateAcquisition(ctx context.Context, domain string) error {
 	var testCache *certmagic.Cache
@@ -204,7 +248,7 @@ func GenerateSelfSignedCertificate() {
 	fingerprint := sha256.Sum256(derBytes)
 	fingerprintHex := hex.EncodeToString(fingerprint[:])
 
-	certFile, err := os.Create(SELF_SIGNED_CERT_NAME)
+	certFile, err := os.Create(selfSignedCertPath())
 	if err != nil {
 		log.Fatalf("Failed to open %s for writing: %v", SELF_SIGNED_CERT_NAME, err)
 	}
@@ -215,7 +259,7 @@ func GenerateSelfSignedCertificate() {
 		log.Fatalf("Error closing %s: %v", SELF_SIGNED_CERT_NAME, err)
 	}
 
-	keyOut, err := os.OpenFile(SELF_SIGNED_KEY_NAME, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyOut, err := os.OpenFile(selfSignedKeyPath(), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		log.Fatalf("Failed to open %s for writing: %v", SELF_SIGNED_KEY_NAME, err)
 	}

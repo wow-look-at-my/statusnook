@@ -48,6 +48,11 @@ func main() {
 		}
 	}
 
+	if err := os.MkdirAll(dataDir(), 0o700); err != nil {
+		log.Fatalf("main.MkdirAll: %s", err)
+	}
+	migrateLegacyTLSPaths()
+
 	if *selfSignedFlag {
 		GenerateSelfSignedCertificate()
 		return
@@ -208,6 +213,7 @@ func main() {
 	r.Use(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if metaSetup != "done" &&
+				r.URL.Path != "/healthz" &&
 				!strings.HasPrefix(r.URL.Path, "/setup") &&
 				!strings.HasPrefix(r.URL.Path, "/static") {
 				http.Redirect(w, r, "/setup", http.StatusFound)
@@ -265,6 +271,7 @@ func main() {
 
 	fs := http.FileServer(http.FS(staticFS))
 	r.Get("/static/*", neuter(fs).ServeHTTP)
+	r.Get("/healthz", health)
 	r.Route("/", func(r chi.Router) {
 		r.Use(statusMiddleware)
 		r.Get("/", index)
@@ -460,11 +467,6 @@ func main() {
 	r.Post("/subscribe/email", postSubscribeEmail)
 	r.Get("/subscribe/email/confirm", getSubscribeEmailConfirm)
 	r.Post("/subscribe/email/confirm", postSubscribeEmailConfirm)
-	r.Post("/test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("aa") == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	})
 
 	appCtx, cancelAppCtx = context.WithCancel(context.Background())
 
@@ -476,6 +478,29 @@ func main() {
 
 	appWg.Add(1)
 	go notificationLoop(appCtx, &appWg)
+
+	appWg.Add(1)
+	go sessionCleanupLoop(appCtx, &appWg)
+
+	if env.GitHub.Managed() {
+		// Pull the config before serving so monitors start from the
+		// repository's current state rather than the last synced copy.
+		src := envGitHubConfigSource()
+		if _, err := syncGitHubConfig(appCtx, src); err != nil {
+			log.Printf(
+				"initial github config sync failed, will retry: %s",
+				describeGitHubError(err),
+			)
+		} else {
+			log.Printf(
+				"github config: watching %s (%s) at %s",
+				src.Repo, branchLabel(src.Branch), src.Path,
+			)
+		}
+
+		appWg.Add(1)
+		go gitHubConfigSyncLoop(appCtx, &appWg)
+	}
 
 	var httpServer *http.Server
 	var httpsServer *http.Server
@@ -515,7 +540,7 @@ func main() {
 		go httpServer.Serve(httpLn)
 
 		if metaSSL == "true" {
-			certmagic.Default.Storage = &certmagic.FileStorage{Path: "certmagic"}
+			certmagic.Default.Storage = &certmagic.FileStorage{Path: certmagicDir()}
 			certmagic.DefaultACME.Agreed = true
 			certmagic.DefaultACME.CA = CA
 			certmagic.DefaultACME.Email = " "
@@ -535,8 +560,8 @@ func main() {
 				certificate, err := getCertificateCertMagic(clientHello)
 				if err != nil {
 					certificate, err := tls.LoadX509KeyPair(
-						SELF_SIGNED_CERT_NAME,
-						SELF_SIGNED_KEY_NAME,
+						selfSignedCertPath(),
+						selfSignedKeyPath(),
 					)
 					if err != nil {
 						log.Printf("main.LoadX509KeyPair: %s", err)

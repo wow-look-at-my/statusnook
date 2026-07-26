@@ -204,7 +204,7 @@ func updateCheck(w http.ResponseWriter, r *http.Request) {
 			LatestVersion:   latestVersion,
 			PublishedAt:     latestRelease.PublishedAt.Format("2006/01/02"),
 			UpdateBody:      latestRelease.Body,
-			Docker:          *dockerFlag,
+			Docker:          env.SelfUpdateDisabled,
 			Ctx:             getPageCtx(r),
 		},
 	)
@@ -249,8 +249,20 @@ func afterUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func postUpdate(w http.ResponseWriter, r *http.Request) {
+	if env.SelfUpdateDisabled {
+		// Under Docker the image owns the binary: replacing it would be
+		// undone by the next container start, and the running process kills
+		// itself to restart, so the container would come back on the old
+		// binary at best.
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(alertOOB(
+			"Self-update is disabled. Pull a newer image and recreate the container",
+		))
+		return
+	}
+
 	httpClient := http.Client{
-		Timeout: time.Second * 10,
+		Timeout: 5 * time.Minute,
 	}
 
 	req, err := http.NewRequest(
@@ -335,34 +347,61 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	err = os.Remove("statusnook")
-	if err != nil {
-		log.Printf("postUpdate.Remove: %s", err)
+	if resp.StatusCode != http.StatusOK {
+		// Writing a 404 page over the binary and then restarting used to be a
+		// possible outcome here.
+		log.Printf("postUpdate.StatusCodeDownload: %d", resp.StatusCode)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	file, err := os.Create("statusnook")
+	executable, err := os.Executable()
+	if err != nil {
+		log.Printf("postUpdate.Executable: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Download beside the current binary, then rename over it: a failed or
+	// truncated download leaves the working binary in place.
+	tmpPath := executable + ".new"
+
+	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o700)
 	if err != nil {
 		log.Printf("postUpdate.Create: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = file.Chmod(0700)
+	written, err := io.Copy(file, resp.Body)
 	if err != nil {
-		log.Printf("postUpdate.Chmod: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	_, err = io.Copy(file, resp.Body)
-	if err != nil {
+		file.Close()
+		os.Remove(tmpPath)
 		log.Printf("postUpdate.Copy: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	file.Close()
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Close: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if written < 1<<20 {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Size: downloaded %d bytes, too small to be a build", written)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.Rename(tmpPath, executable); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Rename: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	const markup = `
 		<div 

@@ -3,12 +3,12 @@ package main
 import (
 	"cmp"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -63,15 +63,29 @@ func Migration1715019045AddSlugColumns(tx *sql.Tx) error {
 	return nil
 }
 
-func initDB(immediate bool) *sql.DB {
-	if _, err := os.Stat("statusnook-data"); errors.Is(err, os.ErrNotExist) {
-		err := os.Mkdir("statusnook-data", os.ModePerm)
-		if err != nil {
-			log.Fatalf("initDB.Mkdir: %s", err)
-		}
+// dataDir returns the directory holding the database and TLS material. It is
+// 0700: the database stores password hashes, notification credentials and the
+// key that decrypts config secrets.
+func dataDir() string {
+	dir := env.DataDir
+	if dir == "" {
+		dir = "statusnook-data"
 	}
 
-	dsn := "file:statusnook-data/app.db?_foreign_keys=on&_journal_mode=wal"
+	return dir
+}
+
+func initDB(immediate bool) *sql.DB {
+	dir := dataDir()
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Fatalf("initDB.MkdirAll: %s", err)
+	}
+
+	// _busy_timeout keeps a concurrent writer from failing outright with
+	// "database is locked" while another transaction commits.
+	dsn := "file:" + filepath.Join(dir, "app.db") +
+		"?_foreign_keys=on&_journal_mode=wal&_busy_timeout=5000"
 	if immediate {
 		dsn += "&_txlock=immediate"
 	}
@@ -126,7 +140,7 @@ func initDB(immediate bool) *sql.DB {
 				if i < len(files)-1 {
 					placeholders += ", "
 				}
-				params = append(params, strings.TrimRight(v.Name(), ".sql"), true)
+				params = append(params, strings.TrimSuffix(v.Name(), ".sql"), true)
 			}
 
 			insertMigrationQuery := fmt.Sprintf(
@@ -176,7 +190,7 @@ func initDB(immediate bool) *sql.DB {
 			}
 
 			for _, file := range files {
-				migrationName := strings.TrimRight(file.Name(), ".sql")
+				migrationName := strings.TrimSuffix(file.Name(), ".sql")
 				if _, ok := existingMigrations[migrationName]; ok {
 					continue
 				}
