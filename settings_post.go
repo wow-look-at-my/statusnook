@@ -16,6 +16,20 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 	name := r.PostFormValue("name")
 	domain := strings.ToLower(r.PostFormValue("domain"))
 
+	// A setting the environment owns is re-applied on every start, so accepting
+	// a change here would silently revert on the next restart.
+	if name != "" && env.Name != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(alertOOB("The name is set by STATUSNOOK_NAME and cannot be changed here"))
+		return
+	}
+
+	if domain != "" && env.Domain != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(alertOOB("The domain is set by STATUSNOOK_DOMAIN and cannot be changed here"))
+		return
+	}
+
 	if name != "" {
 		if metaConfigFileEnabled {
 			w.WriteHeader(http.StatusBadRequest)

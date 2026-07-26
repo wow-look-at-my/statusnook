@@ -125,6 +125,14 @@ const editMonitorMarkup = `
 									<input name="frequency" {{if eq .Monitor.Frequency 60}}checked{{end}} type="radio" value="60" required/>
 									1 minute
 								</label>
+								<label>
+									<input name="frequency" {{if eq .Monitor.Frequency 300}}checked{{end}} type="radio" value="300" required/>
+									5 minutes
+								</label>
+								<label>
+									<input name="frequency" {{if eq .Monitor.Frequency 900}}checked{{end}} type="radio" value="900" required/>
+									15 minutes
+								</label>
 							</div>
 						</div>	
 
@@ -144,6 +152,10 @@ const editMonitorMarkup = `
 								<label>
 									<input name="timeout" {{if eq .Monitor.Timeout 15}}checked{{end}} type="radio" value="15" required/>
 									15 seconds
+								</label>
+								<label>
+									<input name="timeout" {{if eq .Monitor.Timeout 30}}checked{{end}} type="radio" value="30" required/>
+									30 seconds
 								</label>
 							</div>
 						</div>

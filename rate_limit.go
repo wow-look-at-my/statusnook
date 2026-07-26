@@ -42,6 +42,10 @@ func newRateLimiter(maxAttempts int, window time.Duration, lockout time.Duration
 
 var loginLimiter = newRateLimiter(loginMaxAttempts, loginWindow, loginLockout)
 
+// subscribeLimiter caps how many subscription emails one source address can
+// trigger. Every request counts, not just failures.
+var subscribeLimiter = newRateLimiter(10, time.Hour, time.Hour)
+
 // allow reports whether another attempt may be made for key, and how long the
 // caller must wait when it may not.
 func (l *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {

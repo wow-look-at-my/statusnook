@@ -123,6 +123,12 @@ alert-notification-settings:
   slack-install-url: https://slack.com/oauth/v2/authorize?...
 ```
 
+## Monitor values
+
+`frequency` (seconds between checks) must be one of **10, 30, 60, 300, 900**,
+`timeout` one of **5, 10, 15, 30**, and `attempts` one of **1, 2, 3**. `method`
+is one of get, post, patch, put, delete.
+
 ## Renaming a Resource Key
 Below is an example demonstrating how to change the `engineers` mail group key to `engineering-team`
 

@@ -93,7 +93,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if githubConfigSHA != "" {
+		if len(githubConfigSHA) > 7 {
 			githubConfigSHA = githubConfigSHA[0:7]
 		}
 
@@ -183,7 +183,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 						<div class="edit-row">
 							<input id="name" name="name" value="{{.Ctx.Name}}" disabled>
 
-							{{if not .Ctx.ConfigFile}}
+							{{if and (not .Ctx.ConfigFile) (not .EnvName)}}
 								<button 
 									type="button"
 									class="edit-button"
@@ -656,6 +656,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 			GitHubConfigSHA     string
 			GitHubCommitLink    string
 			GitHubConfigErrors  []string
+			EnvName             bool
 			Ctx                 pageCtx
 		}{
 			CurrentVersion:      VERSION,
@@ -667,10 +668,10 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 			ConfigFile:          configFile,
 			GitHubManagedConfig: githubManagedConfig,
 			GitHubConfigSHA:     githubConfigSHA,
-			GitHubCommitLink: githubRepoURL + "/blob/" + githubConfigBranch + "/" +
-				githubConfigPath,
-			GitHubConfigErrors: githubConfigErrors,
-			Ctx:                getPageCtx(r),
+			GitHubCommitLink:    githubBlobLink(githubRepoURL, githubConfigBranch, githubConfigPath),
+			GitHubConfigErrors:  githubConfigErrors,
+			EnvName:             env.Name != "",
+			Ctx:                 getPageCtx(r),
 		},
 	)
 	if err != nil {
@@ -678,4 +679,18 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+}
+
+// githubBlobLink points at the config file on GitHub. An empty branch means the
+// repository's default branch, which GitHub resolves from "HEAD".
+func githubBlobLink(repoURL string, branch string, path string) string {
+	if repoURL == "" {
+		return ""
+	}
+
+	if branch == "" {
+		branch = "HEAD"
+	}
+
+	return repoURL + "/blob/" + branch + "/" + path
 }

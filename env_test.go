@@ -185,3 +185,23 @@ func TestLoadEnvDefaults(t *testing.T) {
 	assert.Equal(t, time.Minute, cfg.GitHub.PollInterval)
 	assert.False(t, cfg.TrustProxy)
 }
+
+func TestMonitorOptionAllowLists(t *testing.T) {
+	// The forms render these as radio groups; the config file is validated
+	// against the same lists.
+	for _, seconds := range []int{10, 30, 60, 300, 900} {
+		assert.True(t, validMonitorFrequency(seconds), "frequency %d", seconds)
+	}
+	assert.False(t, validMonitorFrequency(45))
+	assert.False(t, validMonitorFrequency(0))
+
+	for _, seconds := range []int{5, 10, 15, 30} {
+		assert.True(t, validMonitorTimeout(seconds), "timeout %d", seconds)
+	}
+	assert.False(t, validMonitorTimeout(60))
+
+	assert.True(t, validMonitorAttempts(3))
+	assert.False(t, validMonitorAttempts(4))
+
+	assert.Equal(t, "10, 30, 60, 300, 900", joinInts(monitorFrequencies))
+}

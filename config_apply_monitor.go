@@ -68,16 +68,19 @@ func (a *configApplier) applyMonitors() error {
 			)
 		}
 
-		if v.Frequency != 10 && v.Frequency != 30 && v.Frequency != 60 {
-			msgs = append(msgs, "monitors."+slug+": frequency must be one of 10, 30, 60")
+		if !validMonitorFrequency(v.Frequency) {
+			msgs = append(msgs, "monitors."+slug+
+				": frequency must be one of "+joinInts(monitorFrequencies))
 		}
 
-		if v.Timeout != 5 && v.Timeout != 10 && v.Timeout != 15 {
-			msgs = append(msgs, "monitors."+slug+": timeout must be one of 5, 10, 15")
+		if !validMonitorTimeout(v.Timeout) {
+			msgs = append(msgs, "monitors."+slug+
+				": timeout must be one of "+joinInts(monitorTimeouts))
 		}
 
-		if v.Attempts != 1 && v.Attempts != 2 && v.Attempts != 3 {
-			msgs = append(msgs, "monitors."+slug+": attempts must be one of 1, 2, 3")
+		if !validMonitorAttempts(v.Attempts) {
+			msgs = append(msgs, "monitors."+slug+
+				": attempts must be one of "+joinInts(monitorAttempts))
 		}
 
 		requestHeadersStr, err := json.Marshal(v.RequestHeaders)

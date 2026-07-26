@@ -147,6 +147,14 @@ func getCreateMonitor(w http.ResponseWriter, r *http.Request) {
 										<input name="frequency" type="radio" value="60" required/>
 										1 minute
 									</label>
+									<label>
+										<input name="frequency" type="radio" value="300" required/>
+										5 minutes
+									</label>
+									<label>
+										<input name="frequency" type="radio" value="900" required/>
+										15 minutes
+									</label>
 								</div>
 							</div>	
 
@@ -166,6 +174,10 @@ func getCreateMonitor(w http.ResponseWriter, r *http.Request) {
 									<label>
 										<input name="timeout" type="radio" value="15" required/>
 										15 seconds
+									</label>
+									<label>
+										<input name="timeout" type="radio" value="30" required/>
+										30 seconds
 									</label>
 								</div>
 							</div>

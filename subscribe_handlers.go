@@ -25,6 +25,18 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribing sends mail to an address the caller chose, so the endpoint is
+	// a mail relay for anyone who can reach the status page. The per-address
+	// throttle below does not stop someone cycling through addresses.
+	now := time.Now().UTC()
+	key := "subscribe:" + clientIP(r)
+	if ok, retryAfter := subscribeLimiter.allow(key, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	subscribeLimiter.fail(key, now)
+
 	supressionSyncMu.Lock()
 	if time.Since(lastSuppressionSync) > time.Second*10 {
 		tx, err := db.Begin()

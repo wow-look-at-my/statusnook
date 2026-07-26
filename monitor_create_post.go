@@ -143,7 +143,7 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if frequency != 10 && frequency != 30 && frequency != 60 {
+	if !validMonitorFrequency(frequency) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -153,7 +153,7 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if timeout != 5 && timeout != 10 && timeout != 15 {
+	if !validMonitorTimeout(timeout) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -163,7 +163,7 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if attempts != 1 && attempts != 2 && attempts != 3 {
+	if !validMonitorAttempts(attempts) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
