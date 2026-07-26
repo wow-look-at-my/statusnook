@@ -1,0 +1,327 @@
+package main
+
+import (
+	"fmt"
+	"github.com/go-chi/chi/v5"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+)
+
+func getMonitor(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	dateParam := r.URL.Query().Get("date")
+	if dateParam == "" {
+		dateParam = time.Now().UTC().Format("2006-01-02")
+	}
+
+	date, err := time.Parse("2006-01-02", dateParam)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("getMonitor.Begin: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	const logLimit = 100
+
+	monitor, err := getMonitorByID(tx, id)
+	if err != nil {
+		log.Printf("getMonitor.getMonitorByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	monitorLogs, err := listMonitorLogs(tx, id, logLimit, 0, 0, date)
+	if err != nil {
+		log.Printf("getMonitor.listMonitorLogs: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	lastChecked, err := getMonitorLogLastChecked(tx, monitor.ID)
+	if err != nil {
+		log.Printf("getMonitor.getMonitorLogLastChecked: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		log.Printf("getMonitor.Commit: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if _, ok := r.URL.Query()["ready"]; ok {
+		if len(monitorLogs) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	const markup = `
+		{{define "title"}}{{.Monitor.Name}} - Monitor{{end}}
+		{{define "body"}}
+			<div class="monitor-container">
+				<div class="admin-nav-header monitor-header">
+					<div>
+						<a href="/admin/monitors" hx-boost="true">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+								<path fill-rule="evenodd" d="M11.78 5.22a.75.75 0 0 1 0 1.06L8.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd" />
+							</svg>
+						</a>
+						<h2>{{.Monitor.Name}}</h2>
+					</div>
+					<div>
+						<div>
+							{{if len .Logs}}
+								<div id="last-checked-status" class="badge{{if not .LastCheckedSuccess}} badge--error{{end}}">
+									{{if .LastCheckedSuccess}}
+										<span>OK</span>
+									{{else}}
+										<span>Error</span>
+									{{end}}
+								</div>
+								<span id="next-refresh" class="next-refresh">
+									{{.NextRefreshMsg}}
+								</span>
+							{{end}}
+						</div>
+						
+						<div>
+							<div id="get-monitor-menu" class="menu" hx-preserve>
+								<button class="menu-button">
+									<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none">
+										<path d="M5.99961 1.80005C6.2383 1.80005 6.46722 1.89487 6.63601 2.06365C6.80479 2.23244 6.89961 2.46135 6.89961 2.70005C6.89961 2.93874 6.80479 3.16766 6.63601 3.33645C6.46722 3.50523 6.2383 3.60005 5.99961 3.60005C5.76091 3.60005 5.532 3.50523 5.36321 3.33645C5.19443 3.16766 5.09961 2.93874 5.09961 2.70005C5.09961 2.46135 5.19443 2.23244 5.36321 2.06365C5.532 1.89487 5.76091 1.80005 5.99961 1.80005ZM5.99961 5.10005C6.2383 5.10005 6.46722 5.19487 6.63601 5.36365C6.80479 5.53244 6.89961 5.76135 6.89961 6.00005C6.89961 6.23874 6.80479 6.46766 6.63601 6.63645C6.46722 6.80523 6.2383 6.90005 5.99961 6.90005C5.76091 6.90005 5.532 6.80523 5.36321 6.63645C5.19443 6.46766 5.09961 6.23874 5.09961 6.00005C5.09961 5.76135 5.19443 5.53244 5.36321 5.36365C5.532 5.19487 5.76091 5.10005 5.99961 5.10005ZM6.89961 9.30005C6.89961 9.06135 6.80479 8.83244 6.63601 8.66365C6.46722 8.49487 6.2383 8.40005 5.99961 8.40005C5.76091 8.40005 5.532 8.49487 5.36321 8.66365C5.19443 8.83244 5.09961 9.06135 5.09961 9.30005C5.09961 9.53874 5.19443 9.76766 5.36321 9.93645C5.532 10.1052 5.76091 10.2 5.99961 10.2C6.2383 10.2 6.46722 10.1052 6.63601 9.93645C6.80479 9.76766 6.89961 9.53874 6.89961 9.30005Z" fill="#595959"/>
+									</svg>
+								</button>
+
+								<dialog>
+									{{if not .Ctx.ConfigFile}}
+										<a href="/admin/monitors/{{.Monitor.ID}}/edit" hx-boost="true">Edit</a>
+										<button onclick="document.getElementById('delete-dialog').showModal();">Delete</button>
+									{{else}}
+										<a href="/admin/monitors/{{.Monitor.ID}}/view" hx-boost="true">Details</a>
+									{{end}}								
+								</dialog>
+							</div>
+							<dialog class="modal" id="delete-dialog">
+								<span>Delete {{.Monitor.Name}}</span>
+								<form hx-delete hx-swap="none">
+									<div>
+										<button onclick="document.getElementById('delete-dialog').close(); return false;">Cancel</button>
+										<button>Delete</button>
+									</div>
+								</form>
+							</dialog>
+						</div>
+					</div>
+				</div>
+
+
+				<div class="monitor-log-header">
+					<h3>Logs</h3>
+					
+					<form hx-get="/admin/monitors/{{.Monitor.ID}}" hx-target="body" hx-swap="outerHTML">
+						<input name="date" class="date-picker" type="date" value="{{.Date}}" required />
+						<button class="date-picker-button">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+								<path fill-rule="evenodd" d="M5.75 2a.75.75 0 01.75.75V4h7V2.75a.75.75 0 011.5 0V4h.25A2.75 2.75 0 0118 6.75v8.5A2.75 2.75 0 0115.25 18H4.75A2.75 2.75 0 012 15.25v-8.5A2.75 2.75 0 014.75 4H5V2.75A.75.75 0 015.75 2zm-1 5.5c-.69 0-1.25.56-1.25 1.25v6.5c0 .69.56 1.25 1.25 1.25h10.5c.69 0 1.25-.56 1.25-1.25v-6.5c0-.69-.56-1.25-1.25-1.25H4.75z" clip-rule="evenodd" />
+							</svg>
+						</button>
+					</form>
+				</div>
+
+				<div id="monitor-time" class="monitor-time" hx-preserve>
+					<span id="loader" class="loader"></span>
+				</div>
+
+				{{if len .Logs}}
+					<div class="monitor-logs-container" 
+						hx-get="/admin/monitors/{{.Monitor.ID}}/all?after={{.LastLogID}}&date={{.Date}}" 
+						hx-trigger="load delay:500ms"
+						hx-target=".monitor-logs-container"
+						hx-swap="beforeend"
+					>
+						{{range $i, $log := .Logs}}
+							<div 
+								{{if index $.TimeIDs $log.ID}}id="{{index $.TimeIDs $log.ID}}"{{end}}
+								{{if eq $i 0}}
+									hx-get="/admin/monitors/{{$.Monitor.ID}}/poll?before={{$log.ID}}&date={{$.Date}}" 
+									hx-trigger="load delay:{{$.RefreshDelay}}}s"
+									hx-target="this"
+									hx-swap="outerHTML"
+								{{end}}
+							>
+								<span>{{$log.StartedAt}}</span>
+								<span>{{$log.Latency}}</span>
+								{{if eq $log.Result "error"}}
+									<span class="badge{{if ge $log.ResponseCode.Int64 400}} badge--error{{end}}">
+										{{$log.ResponseCode.Int64}}
+									</span>
+								{{end}}
+
+								{{if eq $log.Result "success"}}
+									<span class="badge">
+										{{$log.ResponseCode.Int64}}
+									</span>
+								{{end}}
+
+								{{if eq $log.Result "timeout"}}
+									<span class="badge badge--error">
+										TIMEOUT
+									</span>
+								{{end}}
+							</div>
+						{{end}}
+					</div>
+				{{else}}
+					<div
+						class="entity-empty-state"
+						hx-get="/admin/monitors/{{.Monitor.ID}}?ready"
+						hx-trigger="every 500ms"
+						hx-target="body"
+					>
+						<div class="icon">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+								<path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clip-rule="evenodd" />
+							</svg>
+						</div>
+						<span>Getting first logs...</span>
+					</div>
+				{{end}}
+			</div>
+			<script>
+				(() => {
+					const interval = setInterval(() => {
+						const nextCheck = document.querySelector("#next-refresh");
+						if (!nextCheck) {
+							return
+						}
+						const num = nextCheck.innerText.slice(0, -1).split(" ").slice(-1);
+						if (num > 0) {
+							nextCheck.innerText = nextCheck.innerText.replace(num, (parseInt(num) - 1).toString());
+						}
+					}, 1000);
+
+					function cleanup(e) {
+						if (e.detail.elt.className === "root") {
+							clearInterval(interval);
+							document.removeEventListener("htmx:beforeCleanupElement", cleanup);
+						}
+					}					
+					document.addEventListener("htmx:beforeCleanupElement", cleanup);
+
+
+					const form = document.querySelector(".monitor-log-header form");
+
+					const datePicker = document.querySelector(".date-picker");
+					const datePickerButton = document.querySelector(".date-picker-button");
+					datePickerButton.addEventListener("click", (e) => {
+						e.preventDefault();
+						datePicker.showPicker();
+					});
+
+					datePicker.addEventListener("change", () => {
+						form.requestSubmit();
+					});
+				})();
+			</script>
+		{{end}}
+	`
+
+	tmpl, err := parseTmpl("getMonitor", markup)
+	if err != nil {
+		log.Printf("getMonitor.parseTmpl: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	refreshDelay := 5
+
+	nextRefreshMsg := fmt.Sprintf(
+		"Checking for updates in %ds",
+		refreshDelay,
+	)
+
+	timeIDs := make(map[int]string, logLimit)
+	for i, log := range monitorLogs {
+		if i > 0 {
+			lastLog := monitorLogs[i-1]
+			if log.StartedAt.Hour() != lastLog.StartedAt.Hour() || log.StartedAt.Minute() != lastLog.StartedAt.Minute() {
+				timeIDs[log.ID] = log.StartedAt.Format("15:04")
+			}
+		} else {
+			timeIDs[log.ID] = log.StartedAt.Format("15:04")
+		}
+	}
+
+	formattedMonitorLogs := make([]MonitorLogView, 0, len(monitorLogs))
+	for _, log := range monitorLogs {
+		formattedMonitorLogs = append(
+			formattedMonitorLogs,
+			MonitorLogView{
+				ID:        log.ID,
+				StartedAt: log.StartedAt.Format("2006/01/02 15:04:05 MST"),
+				Latency: log.EndedAt.Sub(log.StartedAt).
+					Round(time.Millisecond * 1),
+				ResponseCode: log.ResponseCode,
+				ErrorMessage: log.ErrorMessage,
+				Attempts:     log.Attempts,
+				Result:       log.Result,
+				MonitorID:    log.MonitorID,
+			},
+		)
+	}
+
+	if dateParam != "" {
+		w.Header().Set("HX-Push-Url", r.URL.Path+"?date="+dateParam)
+	}
+
+	lastLogID := 0
+	if len(monitorLogs) > 0 {
+		lastLogID = monitorLogs[len(monitorLogs)-1].ID
+	}
+
+	err = tmpl.Execute(
+		w,
+		struct {
+			Monitor            Monitor
+			Logs               []MonitorLogView
+			NextRefreshMsg     string
+			LastCheckedSuccess bool
+			LastLogID          int
+			TimeIDs            map[int]string
+			RefreshDelay       int
+			Ctx                pageCtx
+			Date               string
+		}{
+			Monitor:            monitor,
+			Logs:               formattedMonitorLogs,
+			NextRefreshMsg:     nextRefreshMsg,
+			LastCheckedSuccess: lastChecked.ResponseCode.Int32 != 0 && lastChecked.ResponseCode.Int32 < 400,
+			LastLogID:          lastLogID,
+			TimeIDs:            timeIDs,
+			RefreshDelay:       refreshDelay,
+			Date:               dateParam,
+			Ctx:                getPageCtx(r),
+		},
+	)
+	if err != nil {
+		log.Printf("getMonitor.Execute: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
