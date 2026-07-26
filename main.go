@@ -28,6 +28,26 @@ func main() {
 
 	flag.Parse()
 
+	envCfg, err := loadEnv()
+	if err != nil {
+		log.Fatalf("configuration error: %s", err)
+	}
+	env = envCfg
+
+	// -port wins over STATUSNOOK_PORT when both are given.
+	envPort, err := envInt("PORT", 0)
+	if err != nil {
+		log.Fatalf("configuration error: %s", err)
+	}
+	if envPort != 0 {
+		if envPort < 1 || envPort > 65535 {
+			log.Fatalf("configuration error: STATUSNOOK_PORT must be 1-65535, got %d", envPort)
+		}
+		if !isFlagSet("port") {
+			*portFlag = envPort
+		}
+	}
+
 	if *selfSignedFlag {
 		GenerateSelfSignedCertificate()
 		return
@@ -138,10 +158,25 @@ func main() {
 		return
 	}
 
+	// The environment is applied through the write pool: it changes settings.
+	bootstrapTx, err := rwDB.Begin()
+	if err != nil {
+		log.Fatalf("main.BeginBootstrap: %s", err)
+	}
+	if err := applyEnvBootstrap(bootstrapTx); err != nil {
+		bootstrapTx.Rollback()
+		log.Fatalf("main.applyEnvBootstrap: %s", err)
+	}
+	if err := bootstrapTx.Commit(); err != nil {
+		log.Fatalf("main.CommitBootstrap: %s", err)
+	}
+
 	r := chi.NewRouter()
 	if BUILD == "dev" {
 		r.Use(middleware.Logger)
 	}
+	r.Use(securityHeaders)
+	r.Use(limitRequestBody)
 	if BUILD == "release" && metaSSL == "true" {
 		r.Use(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

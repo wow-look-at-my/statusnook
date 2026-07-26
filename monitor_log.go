@@ -63,7 +63,6 @@ func createMonitorLogLastChecked(
 		startedAt,
 		monitorID,
 		monitorLogID,
-		monitorLogID,
 	)
 	if err != nil {
 		return fmt.Errorf("createMonitorLogLastChecked.Exec: %w", err)

@@ -3,25 +3,39 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"path"
 	"strconv"
 	"strings"
-	"time"
 )
 
+// alertOOB renders an out-of-band alert box for htmx to swap in.
+func alertOOB(message string) []byte {
+	return []byte(fmt.Sprintf(
+		`<div id="alert" class="alert" hx-swap-oob="true">%s</div>`,
+		message,
+	))
+}
+
 func postConfigSettings(w http.ResponseWriter, r *http.Request) {
+	if env.GitHub.Managed() {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(alertOOB(
+			"Configuration is managed through the environment " +
+				"(STATUSNOOK_GITHUB_REPO) and cannot be changed here",
+		))
+		return
+	}
+
 	configFile := r.PostFormValue("config-file") == "on"
 	githubManaged := r.PostFormValue("github-managed") == "on"
 
-	githubRepoURL := strings.TrimSuffix(r.PostFormValue("github-repo-url"), "/")
-	githubBranch := r.PostFormValue("github-branch")
-	githubConfigPath := r.PostFormValue("github-config-path")
-	githubToken := r.PostFormValue("github-token")
+	githubRepoURL := strings.TrimSuffix(strings.TrimSpace(r.PostFormValue("github-repo-url")), "/")
+	githubBranch := strings.TrimSpace(r.PostFormValue("github-branch"))
+	githubConfigPath := strings.TrimSpace(r.PostFormValue("github-config-path"))
+	githubToken := strings.TrimSpace(r.PostFormValue("github-token"))
 	githubWebhookSecret := r.PostFormValue("github-webhook-secret")
 
 	if !configFile && githubManaged {
@@ -37,6 +51,41 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	src := gitHubConfigSource{
+		Branch: githubBranch,
+		Path:   githubConfigPath,
+		Token:  githubToken,
+	}
+
+	if githubManaged {
+		repo, err := normalizeRepo(githubRepoURL)
+		if err != nil || repo == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(alertOOB(
+				"Invalid GitHub repository URL. Use " +
+					"https://github.com/owner/repository",
+			))
+			return
+		}
+		src.Repo = repo
+
+		if err := checkGitHubRepo(r.Context(), src); err != nil {
+			log.Printf("postConfigSettings.checkGitHubRepo: %s", describeGitHubError(err))
+
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(alertOOB(gitHubSetupMessage(err, "repository")))
+			return
+		}
+
+		if _, err := fetchGitHubConfig(r.Context(), src); err != nil {
+			log.Printf("postConfigSettings.fetchGitHubConfig: %s", describeGitHubError(err))
+
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(alertOOB(gitHubSetupMessage(err, "configuration")))
+			return
+		}
+	}
+
 	tx, err := rwDB.Begin()
 	if err != nil {
 		log.Printf("postConfigSettings.Begin: %s", err)
@@ -45,207 +94,28 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	err = updateMetaValue(tx, "configFileEnabled", strconv.FormatBool(configFile))
-	if err != nil {
-		log.Printf("postConfigSettings.updateMetaValueConfigFileEnabled: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err = updateMetaValue(tx, "githubManagedConfig", strconv.FormatBool(githubManaged))
-	if err != nil {
-		log.Printf("postConfigSettings.updateMetaValueGitHubManagedConfig: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	values := map[string]string{
+		"configFileEnabled":   strconv.FormatBool(configFile),
+		"githubManagedConfig": strconv.FormatBool(githubManaged),
 	}
 
 	if githubManaged {
-		parsedRepoURL, err := url.Parse(githubRepoURL)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`<div id="alert" class="alert" hx-swap-oob="true">Invalid repo url</div>`))
-			return
-		}
-
-		if parsedRepoURL.Path == "" {
-			w.Write([]byte(`
-				<div id="alert" class="alert" hx-swap-oob="true">
-					Invalid GitHub repository URL
-				</div>`,
-			))
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		repoPath := parsedRepoURL.Path[1:]
-
-		httpClient := http.Client{
-			Timeout: time.Second * 10,
-		}
-
-		req, err := http.NewRequest(
-			http.MethodGet,
-			"https://api.github.com/repos/"+repoPath,
-			nil,
-		)
-		if err != nil {
-			log.Printf("postConfigSettings.NewRequestRepo: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`<div id="alert" class="alert" hx-swap-oob="true">An unexpected error occurred</div>`,
-			))
-			return
-		}
-		req.Header.Add("Accept", "application/vnd.github+json")
-		req.Header.Add("Authorization", "Bearer "+githubToken)
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			log.Printf("postConfigSettings.DoRepo: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`<div id="alert" class="alert" hx-swap-oob="true">An unexpected error occurred</div>`,
-			))
-			return
-		}
-		defer resp.Body.Close()
-
-		respBody, err := io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("postConfigSettings.ReadAllNon200Repo: %s", err)
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`<div id="alert" class="alert" hx-swap-oob="true">An error occurred when checking for your config</div>`))
-			return
-		}
-
-		if resp.StatusCode != 200 {
-			if string(respBody) != "" {
-				log.Printf("postConfigSettings.StatusCodeRepo: %s", string(respBody))
-			}
-
-			w.WriteHeader(http.StatusBadRequest)
-			if resp.StatusCode == 404 {
-				w.Write([]byte(`
-					<div id="alert" class="alert" hx-swap-oob="true">
-						Your GitHub repository could not be found.
-						Please double-check your repository URL and token permissions, then try again
-					</div>`,
-				))
-			} else if resp.StatusCode == 401 {
-				w.Write([]byte(
-					`<div id="alert" class="alert" hx-swap-oob="true">
-						There's an issue with your personal access token. 
-						Please double-check your personal access token, then try again
-					</div>`,
-				))
-
-			}
-			return
-		}
-
-		req, err = http.NewRequest(
-			http.MethodGet,
-			"https://api.github.com/repos/"+path.Join(repoPath, "contents", githubConfigPath)+"?ref="+
-				githubBranch,
-			nil,
-		)
-		if err != nil {
-			log.Printf("postConfigSettings.NewRequestConfig: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`<div id="alert" class="alert" hx-swap-oob="true">An unexpected error occurred</div>`,
-			))
-			return
-		}
-		req.Header.Add("Accept", "application/vnd.github+json")
-		req.Header.Add("Authorization", "Bearer "+githubToken)
-
-		resp, err = httpClient.Do(req)
-		if err != nil {
-			log.Printf("postConfigSettings.DoConfig: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`<div id="alert" class="alert" hx-swap-oob="true">An unexpected error occurred</div>`,
-			))
-			return
-		}
-		defer resp.Body.Close()
-
-		respBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("postConfigSettings.ReadAllNon200Config: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`<div id="alert" class="alert" hx-swap-oob="true">
-					An unexpected error occurred
-				</div>`,
-			))
-			return
-		}
-
-		if resp.StatusCode != 200 {
-			if string(respBody) != "" {
-				log.Printf("postConfigSettings.StatusCodeConfig: %s", string(respBody))
-			}
-
-			w.WriteHeader(http.StatusBadRequest)
-			if resp.StatusCode == 404 {
-				w.Write([]byte(`
-					<div id="alert" class="alert" hx-swap-oob="true">
-						Your Statusnook configuration could not be found.
-						Please double-check the path and branch, then try again.
-					</div>`,
-				))
-			} else {
-				w.Write([]byte(`
-					<div id="alert" class="alert" hx-swap-oob="true">
-						Your Statusnook configuration could not be found. An unexpcted error occurred.
-					</div>`,
-				))
-			}
-			return
-		}
-
-		err = updateMetaValue(tx, "githubRepoURL", githubRepoURL)
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigBranch: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "githubConfigBranch", githubBranch)
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigBranch: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "githubConfigPath", githubConfigPath)
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigPath: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "githubConfigToken", githubToken)
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigToken: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "githubConfigWebhookSecret", githubWebhookSecret)
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigWebhookSecret: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
+		values["githubRepoURL"] = "https://github.com/" + src.Repo
+		values["githubConfigBranch"] = src.Branch
+		values["githubConfigPath"] = src.Path
+		values["githubConfigToken"] = src.Token
+		values["githubConfigWebhookSecret"] = githubWebhookSecret
+	} else {
+		// Forget the credentials along with the mode they belonged to.
+		values["githubConfigToken"] = ""
+		values["githubConfigWebhookSecret"] = ""
+		values["githubConfigSHA"] = ""
+		values["githubConfigErrors"] = ""
 	}
 
-	if !githubManaged {
-		err = updateMetaValue(tx, "githubConfigSHA", "")
-		if err != nil {
-			log.Printf("postConfigSettings.updateMetaValueGitHubConfigSHA: %s", err)
+	for name, value := range values {
+		if err := updateMetaValue(tx, name, value); err != nil {
+			log.Printf("postConfigSettings.updateMetaValue %s: %s", name, err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -277,6 +147,28 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 	metaConfigFileEnabled = configFile
 
 	w.Header().Add("HX-Location", "/admin/settings")
+}
+
+// gitHubSetupMessage explains a failed connection attempt in terms of the field
+// the operator most likely got wrong.
+func gitHubSetupMessage(err error, subject string) string {
+	var apiErr *gitHubAPIError
+
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.unauthorized():
+			return "There's an issue with your personal access token. " +
+				"Please double-check it grants read access to the repository contents"
+		case apiErr.notFound() && subject == "repository":
+			return "Your GitHub repository could not be found. Please double-check " +
+				"the repository URL and your token's permissions"
+		case apiErr.notFound():
+			return "Your Statusnook configuration could not be found. " +
+				"Please double-check the path and branch"
+		}
+	}
+
+	return "Could not reach GitHub. Please try again"
 }
 
 func postGenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {

@@ -1,14 +1,16 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"errors"
-	"golang.org/x/crypto/bcrypt"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func getLogin(w http.ResponseWriter, r *http.Request) {
@@ -65,8 +67,16 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
+	const badCredentials = `
+		<div id="alert" class="alert" hx-swap-oob="true">
+			Incorrect credentials
+		</div>
+	`
+
 	username := r.PostFormValue("username")
-	if username == "" {
+	password := r.PostFormValue("password")
+
+	if username == "" || password == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`
 			<div id="alert" class="alert" hx-swap-oob="true">
@@ -76,15 +86,27 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	password := r.PostFormValue("password")
-	if password == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Enter a username and password
-			</div>
-		`))
-		return
+	// Rate limit per source address and per username, so neither one account
+	// nor one client can be hammered.
+	now := time.Now().UTC()
+	keys := []string{"ip:" + clientIP(r), "user:" + strings.ToLower(username)}
+	for _, key := range keys {
+		if ok, retryAfter := loginLimiter.allow(key, now); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(fmt.Sprintf(`
+				<div id="alert" class="alert" hx-swap-oob="true">
+					Too many failed attempts. Try again in %d minutes
+				</div>
+			`, int(retryAfter.Minutes())+1)))
+			return
+		}
+	}
+
+	failed := func() {
+		for _, key := range keys {
+			loginLimiter.fail(key, now)
+		}
 	}
 
 	tx, err := rwDB.Begin()
@@ -98,12 +120,12 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	pwHash, userID, err := getPasswordHash(tx, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// Hash a dummy password so a missing user does not answer faster
+			// than a wrong password.
+			bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+			failed()
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`
-				<div id="alert" class="alert" hx-swap-oob="true">
-					Incorrect credentials
-				</div>
-			`))
+			w.Write([]byte(badCredentials))
 			return
 		}
 		log.Printf("postLogin.getPasswordHash: %s", err)
@@ -112,33 +134,18 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(password)); err != nil {
+		failed()
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Incorrect credentials
-			</div>
-		`))
+		w.Write([]byte(badCredentials))
 		return
 	}
 
-	tokenBytes := make([]byte, 32)
-	_, err = rand.Read(tokenBytes)
+	token, csrfToken, err := newSessionTokens()
 	if err != nil {
-		log.Printf("postLogin.Read: %s", err)
+		log.Printf("postLogin.newSessionTokens: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	csrfTokenBytes := make([]byte, 32)
-	_, err = rand.Read(csrfTokenBytes)
-	if err != nil {
-		log.Printf("postLogin.Read2: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	token := base64.StdEncoding.EncodeToString(tokenBytes)
-	csrfToken := base64.StdEncoding.EncodeToString(csrfTokenBytes)
 
 	if err = createSession(tx, token, csrfToken, userID); err != nil {
 		log.Printf("postLogin.createSession: %s", err)
@@ -152,21 +159,18 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(
-		w,
-		&http.Cookie{
-			Name:     "session",
-			Value:    token,
-			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
-			Secure:   BUILD == "release",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		},
-	)
+	for _, key := range keys {
+		loginLimiter.succeed(key)
+	}
+
+	http.SetCookie(w, sessionCookie(r, token))
 
 	w.Header().Add("HX-Location", "/admin/alerts")
 }
+
+// dummyPasswordHash is a valid bcrypt hash of a random string, compared
+// against when the username does not exist to keep response times even.
+const dummyPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 
 func adminIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/alerts")

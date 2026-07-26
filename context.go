@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"database/sql"
 	"embed"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed static/*
@@ -97,13 +99,83 @@ func csrfMiddleware(h http.Handler) http.Handler {
 		csrfToken := r.Header.Get("csrf-token")
 		authCtx := getAuthCtx(r)
 
-		if csrfToken != authCtx.CSRFToken {
+		if authCtx.CSRFToken == "" || !hmac.Equal([]byte(csrfToken), []byte(authCtx.CSRFToken)) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 
 		h.ServeHTTP(w, r)
 	})
+}
+
+// maxRequestBody bounds any request body. The config editor posts the whole
+// config document, which is the largest legitimate body.
+const maxRequestBody = 2 * maxConfigSize
+
+// limitRequestBody stops an unauthenticated client from making the process
+// read an unbounded body into memory. The webhook applies its own, smaller
+// limit before it verifies the signature.
+func limitRequestBody(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+
+		h.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders sets the headers every response should carry. There is no
+// Content-Security-Policy: the UI relies on inline scripts and styles
+// throughout, so a policy permissive enough to work would not add protection.
+func securityHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("X-Frame-Options", "SAMEORIGIN")
+		header.Set("Referrer-Policy", "same-origin")
+
+		if requestIsHTTPS(r) {
+			header.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+
+		h.ServeHTTP(w, r)
+	})
+}
+
+// requestIsHTTPS reports whether the browser reached Statusnook over TLS,
+// consulting X-Forwarded-Proto only when a proxy is trusted. It decides whether
+// session cookies may carry the Secure attribute: setting Secure on a plain
+// HTTP deployment (a NAS reached at http://nas.local:8000) makes the browser
+// drop the cookie, which locks the operator out of their own admin area.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+
+	if !env.TrustProxy {
+		return false
+	}
+
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.Index(proto, ","); i != -1 {
+		proto = proto[:i]
+	}
+
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// sessionCookie builds the session cookie for a request.
+func sessionCookie(r *http.Request, token string) *http.Cookie {
+	return &http.Cookie{
+		Name:     "session",
+		Value:    token,
+		Path:     "/",
+		Expires:  time.Now().UTC().Add(sessionLifetime),
+		Secure:   requestIsHTTPS(r),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 func statusMiddleware(h http.Handler) http.Handler {

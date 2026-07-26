@@ -25,6 +25,7 @@ create table session(
     id integer primary key,
     token text not null unique,
     csrf_token text not null unique,
+    created_at datetime,
     user_id int references user(id) on delete cascade not null
 );
 

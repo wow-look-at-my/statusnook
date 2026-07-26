@@ -223,18 +223,7 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(
-		w,
-		&http.Cookie{
-			Name:     "session",
-			Value:    token,
-			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
-			Secure:   BUILD == "release",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		},
-	)
+	http.SetCookie(w, sessionCookie(r, token))
 
 	w.Header().Add("HX-Location", "/admin/alerts")
 }

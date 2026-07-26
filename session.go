@@ -1,16 +1,41 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"time"
 )
+
+// sessionLifetime is how long a login lasts. Sessions used to have no expiry
+// at all, and the cookie was dated a century out, so one stolen cookie was
+// valid forever.
+const sessionLifetime = 30 * 24 * time.Hour
+
+// newSessionTokens returns a session token and its paired CSRF token.
+func newSessionTokens() (string, string, error) {
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", "", fmt.Errorf("newSessionTokens.Read: %w", err)
+	}
+
+	csrfTokenBytes := make([]byte, 32)
+	if _, err := rand.Read(csrfTokenBytes); err != nil {
+		return "", "", fmt.Errorf("newSessionTokens.ReadCSRF: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(tokenBytes),
+		base64.StdEncoding.EncodeToString(csrfTokenBytes),
+		nil
+}
 
 func createSession(tx *sql.Tx, token string, csrfToken string, userID int) error {
 	const query = `
-		insert into session(token, csrf_token, user_id) values(?, ?, ?)
+		insert into session(token, csrf_token, user_id, created_at) values(?, ?, ?, ?)
 	`
 
-	_, err := tx.Exec(query, token, csrfToken, userID)
+	_, err := tx.Exec(query, token, csrfToken, userID, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("createSession.Exec: %w", err)
 	}
@@ -23,17 +48,33 @@ func validateSession(tx *sql.Tx, token string) (int, string, error) {
 		select user.id, session.csrf_Token
 		from user
 		left join session on session.user_id = user.id
-		where session.token = ?
+		where session.token = ? and session.created_at > ?
 	`
 
 	userID := 0
 	csrfToken := ""
-	err := tx.QueryRow(query, token).Scan(&userID, &csrfToken)
+	err := tx.QueryRow(query, token, time.Now().UTC().Add(-sessionLifetime)).Scan(
+		&userID, &csrfToken,
+	)
 	if err != nil {
 		return userID, csrfToken, err
 	}
 
 	return userID, csrfToken, nil
+}
+
+// deleteExpiredSessions drops rows validateSession would already reject.
+func deleteExpiredSessions(tx *sql.Tx) (int64, error) {
+	const query = `
+		delete from session where created_at is null or created_at <= ?
+	`
+
+	result, err := tx.Exec(query, time.Now().UTC().Add(-sessionLifetime))
+	if err != nil {
+		return 0, fmt.Errorf("deleteExpiredSessions.Exec: %w", err)
+	}
+
+	return result.RowsAffected()
 }
 
 type SettingsUser struct {

@@ -8,7 +8,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"log"
 	"net/http"
-	"time"
 )
 
 func getSetupAccount(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +93,12 @@ func logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(
 		w,
 		&http.Cookie{
-			Name:   "session",
-			MaxAge: -1,
+			Name:     "session",
+			Path:     "/",
+			MaxAge:   -1,
+			Secure:   requestIsHTTPS(r),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
 		},
 	)
 
@@ -254,18 +257,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 
 	metaSetup = "name"
 
-	http.SetCookie(
-		w,
-		&http.Cookie{
-			Name:     "session",
-			Value:    token,
-			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
-			Secure:   BUILD == "release",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		},
-	)
+	http.SetCookie(w, sessionCookie(r, token))
 
 	w.Header().Add("HX-Location", "/setup/name")
 }

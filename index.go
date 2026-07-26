@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -478,9 +480,64 @@ func getResolve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Access-Control-Expose-Headers", "X-Statusnook")
 }
 
-var crossAuthTokens = map[string]int{}
+// crossAuthStore holds the one-time tokens that hand a session from the
+// apex domain to the configured custom domain. It is guarded by a mutex:
+// handlers run concurrently, and an unsynchronised map here used to be able to
+// take the whole process down with a concurrent map write.
+type crossAuthStore struct {
+	mu     sync.Mutex
+	tokens map[string]crossAuthToken
+}
+
+type crossAuthToken struct {
+	userID    int
+	expiresAt time.Time
+}
+
+// crossAuthTokenLifetime is deliberately short: the token travels in a URL and
+// is redeemed by an immediate redirect.
+const crossAuthTokenLifetime = time.Minute
+
+var crossAuthTokens = &crossAuthStore{tokens: map[string]crossAuthToken{}}
+
+func (s *crossAuthStore) issue(token string, userID int, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key, value := range s.tokens {
+		if now.After(value.expiresAt) {
+			delete(s.tokens, key)
+		}
+	}
+
+	s.tokens[token] = crossAuthToken{
+		userID:    userID,
+		expiresAt: now.Add(crossAuthTokenLifetime),
+	}
+}
+
+// redeem consumes a token, returning the user it authenticates.
+func (s *crossAuthStore) redeem(token string, now time.Time) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	value, ok := s.tokens[token]
+	delete(s.tokens, token)
+
+	if !ok || now.After(value.expiresAt) {
+		return 0, false
+	}
+
+	return value.userID, true
+}
 
 func postResolve(w http.ResponseWriter, r *http.Request) {
+	authCtx := getAuthCtx(r)
+	if authCtx.ID == 0 {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	tokenBytes := make([]byte, 32)
 	_, err := rand.Read(tokenBytes)
 	if err != nil {
@@ -491,14 +548,13 @@ func postResolve(w http.ResponseWriter, r *http.Request) {
 
 	token := base64.URLEncoding.EncodeToString(tokenBytes)
 
-	authCtx := getAuthCtx(r)
-	crossAuthTokens[token] = authCtx.ID
+	crossAuthTokens.issue(token, authCtx.ID, time.Now().UTC())
 
 	w.Write([]byte(token))
 }
 
 func getCrossAuth(w http.ResponseWriter, r *http.Request) {
-	redirectURL := "https://" + metaDomain + r.URL.Query().Get("after")
+	redirectURL := "https://" + metaDomain + safeRedirectPath(r.URL.Query().Get("after"))
 
 	auth := getAuthCtx(r)
 	if auth.ID != 0 {
@@ -512,30 +568,18 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, ok := crossAuthTokens[tokenParam]
+	userID, ok := crossAuthTokens.redeem(tokenParam, time.Now().UTC())
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	tokenBytes := make([]byte, 32)
-	_, err := rand.Read(tokenBytes)
+	token, csrfToken, err := newSessionTokens()
 	if err != nil {
-		log.Printf("getCrossAuth.Read: %s", err)
+		log.Printf("getCrossAuth.newSessionTokens: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	csrfTokenBytes := make([]byte, 32)
-	_, err = rand.Read(csrfTokenBytes)
-	if err != nil {
-		log.Printf("getCrossAuth.Read2: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	token := base64.StdEncoding.EncodeToString(tokenBytes)
-	csrfToken := base64.StdEncoding.EncodeToString(csrfTokenBytes)
 
 	tx, err := rwDB.Begin()
 	if err != nil {
@@ -557,20 +601,32 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	delete(crossAuthTokens, tokenParam)
-
-	http.SetCookie(
-		w,
-		&http.Cookie{
-			Name:     "session",
-			Value:    token,
-			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
-			Secure:   BUILD == "release",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		},
-	)
+	http.SetCookie(w, sessionCookie(r, token))
 
 	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+// safeRedirectPath keeps an attacker-supplied "after" parameter from turning
+// the cross-auth redirect into an open redirect. "//evil.com" is a
+// protocol-relative URL and "@evil.com" makes the domain a userinfo field, so
+// only a single-slash path is accepted.
+func safeRedirectPath(after string) string {
+	if after == "" || !strings.HasPrefix(after, "/") || strings.HasPrefix(after, "//") {
+		return "/"
+	}
+
+	parsed, err := url.Parse(after)
+	if err != nil || parsed.Host != "" || parsed.Scheme != "" {
+		return "/"
+	}
+
+	return parsed.EscapedPath() + optionalQuery(parsed.RawQuery)
+}
+
+func optionalQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	return "?" + raw
 }

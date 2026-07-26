@@ -13,7 +13,13 @@ import (
 	"time"
 )
 
+// maxMonitorResponse caps how much of a monitored endpoint's response body is
+// read. The body is discarded; only the status code matters.
+const maxMonitorResponse = 1 << 20
+
 func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	checkoutMu := sync.RWMutex{}
 	lastCheckedMu := sync.RWMutex{}
 
@@ -62,8 +68,10 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 					checkoutMu.RLock()
 					if _, ok := checkout[monitor.ID]; ok {
+						// This monitor is still being checked; skip it, but
+						// keep checking the rest of the list.
 						checkoutMu.RUnlock()
-						return
+						continue
 					}
 					checkoutMu.RUnlock()
 
@@ -71,7 +79,10 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 					checkout[monitor.ID] = time.Now().UTC()
 					checkoutMu.Unlock()
 
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
+
 						var endedAt time.Time
 
 						defer func() {
@@ -104,7 +115,8 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								body = strings.NewReader(monitor.Body.String)
 							}
 
-							monitorReq, err := http.NewRequest(
+							monitorReq, err := http.NewRequestWithContext(
+								ctx,
 								monitor.Method,
 								monitor.URL,
 								body,
@@ -122,7 +134,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								continue
 							}
 
-							_, err = io.Copy(io.Discard, resp.Body)
+							_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxMonitorResponse))
 							if err != nil {
 								log.Printf("monitorLoop.Copy: %s", err)
 								break
@@ -220,7 +232,10 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 							return
 						}
 
-						if len(channels) > 0 {
+						// lastChecked.ID is zero when this is the monitor's first
+						// ever check: there is no transition to report, and
+						// notifying here announced a recovery that never happened.
+						if len(channels) > 0 && lastChecked.ID != 0 {
 							lastHappy := lastChecked.ResponseCode.Int32 != 0 &&
 								lastChecked.ResponseCode.Int32 < 400
 
@@ -294,7 +309,6 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 				}
 			}()
 		case <-ctx.Done():
-			wg.Done()
 			return
 		}
 	}

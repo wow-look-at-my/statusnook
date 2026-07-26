@@ -4,19 +4,43 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"path"
 	"strings"
-	"time"
 )
 
+// maxWebhookPayload bounds a webhook body. GitHub's own limit is 25 MB, but a
+// push event that matters here is a few KB, and anyone can POST to this
+// endpoint before the signature is checked.
+const maxWebhookPayload = 1 << 20
+
+// webhookSecret resolves the shared secret, preferring the environment.
+func webhookSecret(tx *sql.Tx) (string, error) {
+	if env.GitHub.WebhookSecret != "" {
+		return env.GitHub.WebhookSecret, nil
+	}
+
+	if env.GitHub.Managed() {
+		// The environment owns the GitHub configuration but did not set a
+		// webhook secret: webhook delivery stays off, polling does the work.
+		return "", nil
+	}
+
+	secret, err := getMetaValue(tx, "githubConfigWebhookSecret")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	return secret, nil
+}
+
+// configWebhook applies the repository's config file when GitHub reports a push
+// to the watched branch. Polling covers instances GitHub cannot reach; this
+// endpoint just makes the update immediate for instances it can.
 func configWebhook(w http.ResponseWriter, r *http.Request) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -24,238 +48,133 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	defer tx.Rollback()
 
-	githubManagedConfig, err := getMetaValue(tx, "githubManagedConfig")
+	src, err := gitHubConfigSourceFromDB(tx)
 	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubManagedConfig: %s", err)
+		tx.Rollback()
+		log.Printf("configWebhook.gitHubConfigSourceFromDB: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	if githubManagedConfig != "true" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
+	managed := src.FromEnv
+	if !managed {
+		githubManagedConfig, err := getMetaValue(tx, "githubManagedConfig")
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			tx.Rollback()
+			log.Printf("configWebhook.getMetaValueGitHubManagedConfig: %s", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		managed = githubManagedConfig == "true"
 	}
 
-	sig := r.Header.Get("X-Hub-Signature-256")
-	if !strings.HasPrefix(sig, "sha256=") {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	sig = strings.TrimPrefix(sig, "sha256=")
-
-	key, err := getMetaValue(tx, "githubConfigWebhookSecret")
+	secret, err := webhookSecret(tx)
 	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubWebhookSecret: %s", err)
+		tx.Rollback()
+		log.Printf("configWebhook.webhookSecret: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	repoURL, err := getMetaValue(tx, "githubRepoURL")
-	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubRepoURL: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	branch, err := getMetaValue(tx, "githubConfigBranch")
-	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubConfigBranch: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	configPath, err := getMetaValue(tx, "githubConfigPath")
-	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubConfigPath: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	token, err := getMetaValue(tx, "githubConfigToken")
-	if err != nil {
-		log.Printf("configWebhook.getMetaValueGitHubConfigToken: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	configSHA, err := getMetaValue(tx, "githubConfigSHA")
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Printf("configWebhook.getMetaValueGitHubConfigSHA: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	payload, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("configWebhook.ReadAll: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	mac := hmac.New(sha256.New, []byte(key))
-	mac.Write(payload)
-	payloadMac := mac.Sum(nil)
-
-	headerMac, err := hex.DecodeString(sig)
-	if err != nil {
-		log.Printf("configWebhook.DecodeString: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	if !hmac.Equal(headerMac, payloadMac) {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err = tx.Commit()
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		log.Printf("configWebhook.CommitRead: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	parsedRepoURL, err := url.Parse(repoURL)
+	if !managed || !src.configured() || secret == "" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	payload, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookPayload+1))
 	if err != nil {
-		log.Printf("configWebhook.Parse: %s", err)
+		log.Printf("configWebhook.ReadAll: %s", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if len(payload) > maxWebhookPayload {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	if !validWebhookSignature(r.Header.Get("X-Hub-Signature-256"), secret, payload) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Everything below this line is authenticated.
+
+	event := r.Header.Get("X-GitHub-Event")
+	if event == "ping" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if event != "" && event != "push" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !pushTouchesBranch(payload, src.Branch) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if _, err := syncGitHubConfig(r.Context(), src); err != nil {
+		log.Printf("configWebhook.syncGitHubConfig: %s", describeGitHubError(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	repoPath := parsedRepoURL.Path[1:]
+	w.WriteHeader(http.StatusOK)
+}
 
-	httpClient := http.Client{
-		Timeout: time.Second * 10,
+// validWebhookSignature verifies GitHub's HMAC over the raw body in constant
+// time.
+func validWebhookSignature(header string, secret string, payload []byte) bool {
+	if !strings.HasPrefix(header, "sha256=") {
+		return false
 	}
 
-	req, err := http.NewRequest(
-		http.MethodGet,
-		"https://api.github.com/repos/"+path.Join(repoPath, "contents", configPath)+"?ref="+branch,
-		nil,
-	)
+	headerMac, err := hex.DecodeString(strings.TrimPrefix(header, "sha256="))
 	if err != nil {
-		log.Printf("configWebhook.NewRequest: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	req.Header.Add("Accept", "application/vnd.github+json")
-	req.Header.Add("Authorization", "Bearer "+token)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("configWebhook.Do: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, err := io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("configWebhook.ReadAllNon200: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		if string(respBody) != "" {
-			log.Printf("configWebhook.StatusCode: %s", string(respBody))
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return false
 	}
 
-	type repositoryContentResponse struct {
-		Type    string `json:"type"`
-		Content string `json:"content"`
-		SHA     string `json:"sha"`
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+
+	return hmac.Equal(headerMac, mac.Sum(nil))
+}
+
+// pushTouchesBranch keeps a push to an unwatched branch from applying that
+// branch's config. An empty watched branch means "the default branch", which
+// the payload reports per push.
+func pushTouchesBranch(payload []byte, branch string) bool {
+	var push struct {
+		Ref        string `json:"ref"`
+		Repository struct {
+			DefaultBranch string `json:"default_branch"`
+		} `json:"repository"`
 	}
 
-	var contentResp repositoryContentResponse
-
-	jsonDecoder := json.NewDecoder(resp.Body)
-	err = jsonDecoder.Decode(&contentResp)
-	if err != nil {
-		log.Printf("configWebhook.Decode: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	if err := json.Unmarshal(payload, &push); err != nil {
+		// Not a push payload we understand; let the sync decide.
+		return true
 	}
 
-	content, err := base64.StdEncoding.DecodeString(contentResp.Content)
-	if err != nil {
-		log.Printf("configWebhook.DecodeString: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	if push.Ref == "" {
+		return true
 	}
 
-	tx, err = rwDB.Begin()
-	if err != nil {
-		log.Printf("configWebhook.BeginWrite: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	pushed := strings.TrimPrefix(push.Ref, "refs/heads/")
+	if branch == "" {
+		branch = push.Repository.DefaultBranch
 	}
-	defer tx.Rollback()
-
-	if contentResp.SHA != configSHA {
-		msgs, err := applyConfig(tx, content)
-		if err != nil {
-			unwrappedErr := errors.Unwrap(err)
-			if !strings.HasPrefix(unwrappedErr.Error(), "yaml:") {
-				log.Printf("configWebhook.applyConfig: %s", err)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-
-			msgs = append(msgs, strings.TrimPrefix(unwrappedErr.Error(), "yaml: "))
-		}
-
-		configErrors := ""
-
-		if len(msgs) > 0 {
-			msgsBytes, err := json.Marshal(msgs)
-			if err != nil {
-				log.Printf("configWebhook.Marshal: %s", err)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			configErrors = string(msgsBytes)
-		}
-
-		err = updateMetaValue(tx, "githubConfigErrors", string(configErrors))
-		if err != nil {
-			log.Printf("configWebhook.updateMetaValueGitHubConfigErrors: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "configFile", string(content))
-		if err != nil {
-			log.Printf("configWebhook.updateMetaValueConfigFile: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		err = updateMetaValue(tx, "githubConfigSHA", contentResp.SHA)
-		if err != nil {
-			log.Printf("configWebhook.updateMetaValueGitHubConfigSHA: %s", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
+	if branch == "" {
+		return true
 	}
 
-	name, err := getMetaValue(tx, "name")
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Fatalf("configWebhook.getMetaValueName: %s", err)
-		return
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("configWebhook.CommitWrite: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	metaName = name
+	return pushed == branch
 }
