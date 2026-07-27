@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 )
 
@@ -140,8 +139,6 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	domainPattern := regexp.MustCompile(`^[a-z0-9]+(?:[\-.][a-z0-9]+)*\.[a-z]+$`)
-
 	if strings.Contains(domainParam, "/") {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write(alertOOBClass("It looks like you've entered a URL, please enter a domain", "domain-alert"))
@@ -239,8 +236,6 @@ func postSetupDomainSkip(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	domainPattern := regexp.MustCompile(`^[a-z0-9]+(?:[\-.][a-z0-9]+)*\.[a-z]+$`)
 
 	if !domainPattern.MatchString(domainParam) {
 		w.WriteHeader(http.StatusBadRequest)

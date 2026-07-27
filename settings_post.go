@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 )
 
@@ -98,6 +97,27 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Validate before storing: the unconfirmed domain drives a background
+		// verification loop and the settings page, so a rejected value must not
+		// end up in the database.
+		if strings.Contains(domain, "/") {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(bannerOOB("It looks like you've entered a URL, please enter a domain"))
+			return
+		}
+
+		if net.ParseIP(domain).String() != "<nil>" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(bannerOOB("It looks like you've entered an IP address, please enter a domain"))
+			return
+		}
+
+		if !domainPattern.MatchString(domain) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(bannerOOB("Invalid domain"))
+			return
+		}
+
 		if metaDomain == "" {
 			tx, err := rwDB.Begin()
 			if err != nil {
@@ -124,26 +144,6 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			}
 
 			metaUnconfirmedDomain = domain
-		}
-
-		domainPattern := regexp.MustCompile(`^[a-z0-9]+(?:[\-.][a-z0-9]+)*\.[a-z]+$`)
-
-		if strings.Contains(domain, "/") {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(bannerOOB("It looks like you've entered a URL, please enter a domain"))
-			return
-		}
-
-		if net.ParseIP(domain).String() != "<nil>" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(bannerOOB("It looks like you've entered an IP address, please enter a domain"))
-			return
-		}
-
-		if !domainPattern.MatchString(domain) {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(bannerOOB("Invalid domain"))
-			return
 		}
 
 		found, err := lookupDomain(domain)
@@ -179,7 +179,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				if err := tx.Commit(); err != nil {
 					log.Printf("postSettings.CommitUnconfirmedDomainProblemNotFound: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write(bannerOOB("span>An unexpected error occurred"))
+					w.Write(bannerOOB("An unexpected error occurred"))
 					return
 				}
 
