@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"github.com/mholt/acmez/acme"
 	"log"
 	"net"
@@ -188,15 +187,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			}
 
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(
-				fmt.Sprintf(`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>%s</span>
-					</div>
-				`,
-					notFoundMsg,
-				),
-			))
+			w.Write(bannerOOB(notFoundMsg))
 			return
 		}
 
@@ -250,15 +241,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 			}
 
-			w.Write([]byte(
-				fmt.Sprintf(`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>%s</span>
-					</div>
-				`,
-					errMsg,
-				),
-			))
+			w.Write(bannerOOB(errMsg))
 			return
 		}
 

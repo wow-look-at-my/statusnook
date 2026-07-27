@@ -35,12 +35,6 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
-	const badCredentials = `
-		<div id="alert" class="alert" hx-swap-oob="true">
-			Incorrect credentials
-		</div>
-	`
-
 	username := r.PostFormValue("username")
 	password := r.PostFormValue("password")
 
@@ -58,11 +52,10 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		if ok, retryAfter := loginLimiter.allow(key, now); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(fmt.Sprintf(`
-				<div id="alert" class="alert" hx-swap-oob="true">
-					Too many failed attempts. Try again in %d minutes
-				</div>
-			`, int(retryAfter.Minutes())+1)))
+			w.Write(alertOOB(fmt.Sprintf(
+				"Too many failed attempts. Try again in %d minutes",
+				int(retryAfter.Minutes())+1,
+			)))
 			return
 		}
 	}
@@ -89,7 +82,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 			bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 			failed()
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(badCredentials))
+			w.Write(alertOOB("Incorrect credentials"))
 			return
 		}
 		log.Printf("postLogin.getPasswordHash: %s", err)
@@ -100,7 +93,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	if err = bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(password)); err != nil {
 		failed()
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(badCredentials))
+		w.Write(alertOOB("Incorrect credentials"))
 		return
 	}
 
