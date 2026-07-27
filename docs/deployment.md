@@ -15,8 +15,11 @@ The repository ships a working [`docker-compose.yml`](../docker-compose.yml) and
 ```
 cp .env.example .env
 $EDITOR .env
-docker compose up -d
+docker compose up -d          # builds the image from this checkout
 ```
+
+The compose file builds the image locally on purpose: the environment variables
+below are not in the published upstream image.
 
 The container comes up with the admin account already created, the
 configuration pulled from your repository, and monitors running. There is no
@@ -31,7 +34,7 @@ setup wizard to walk through.
   set `user: "1000:1000"` in the service and `chown` the directory to match.
 - **Health**: `GET /healthz` returns 200 when the process can read its
   database. The image's `HEALTHCHECK` uses it.
-- **Updates**: `docker compose pull && docker compose up -d`. In-place
+- **Updates**: `git pull && docker compose up -d --build`. In-place
   self-update is disabled under Docker - the image owns the binary.
 
 ### TLS

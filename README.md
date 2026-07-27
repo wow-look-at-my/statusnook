@@ -41,7 +41,7 @@ Or with Compose, keeping your monitors in a private GitHub repository:
 
 ```
 cp .env.example .env    # admin credentials, repo, read-only PAT
-docker compose up -d
+docker compose up -d    # builds from this checkout
 ```
 
 Statusnook polls the repository, so nothing has to reach into your network -

@@ -9,9 +9,10 @@
 
 services:
   statusnook:
-    image: goksan/statusnook
-    # Build the image from this checkout instead of pulling it:
-    # build: .
+    # Built from this checkout: the environment-driven configuration below is
+    # not in the published upstream image.
+    build: .
+    image: statusnook:local
     container_name: statusnook
     restart: unless-stopped
     ports:
