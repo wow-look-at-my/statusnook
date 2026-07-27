@@ -187,3 +187,41 @@ func TestCrossAuthTokenExpires(t *testing.T) {
 func plainTLSState() *tls.ConnectionState {
 	return &tls.ConnectionState{HandshakeComplete: true}
 }
+
+func TestSecurityHeaders(t *testing.T) {
+	prev := env
+	t.Cleanup(func() { env = prev })
+	env = envConfig{}
+
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	statusPage := httptest.NewRecorder()
+	handler.ServeHTTP(statusPage, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	assert.Equal(t, "nosniff", statusPage.Header().Get("X-Content-Type-Options"))
+	assert.Empty(t, statusPage.Header().Get("Strict-Transport-Security"))
+	assert.Empty(
+		t, statusPage.Header().Get("X-Frame-Options"),
+		"a public status page is embeddable on purpose",
+	)
+
+	admin := httptest.NewRecorder()
+	handler.ServeHTTP(admin, httptest.NewRequest(http.MethodGet, "/admin/monitors", nil))
+	assert.Equal(t, "SAMEORIGIN", admin.Header().Get("X-Frame-Options"))
+
+	secure := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "https://status.example.com/admin", nil)
+	req.TLS = plainTLSState()
+	handler.ServeHTTP(secure, req)
+	assert.Contains(t, secure.Header().Get("Strict-Transport-Security"), "max-age=")
+}
+
+func TestIsAuthenticatedArea(t *testing.T) {
+	for _, path := range []string{"/admin", "/admin/", "/admin/monitors", "/login", "/setup/domain"} {
+		assert.True(t, isAuthenticatedArea(path), "path %q", path)
+	}
+
+	for _, path := range []string{"/", "/history", "/static/main.css", "/administrator"} {
+		assert.False(t, isAuthenticatedArea(path), "path %q", path)
+	}
+}

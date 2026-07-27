@@ -45,6 +45,11 @@ Handlers, their SQL helpers and their markup sit together.
 - Every write goes through `rwDB` (single connection, `_txlock=immediate`);
   reads use `db`.
 - All state lives under `dataDir()`: database, secret key, certificates.
+- Mail goes through `sendMail` (smtp.go), never `net/smtp.SendMail`: the
+  standard function dials without a timeout and used to be able to wedge the
+  notification loop permanently.
+- Monitor frequency/timeout/attempts come from the allow-lists in
+  monitor_option.go; the radio groups in the forms must match them.
 
 ## Docs
 

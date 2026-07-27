@@ -123,6 +123,12 @@ alert-notification-settings:
   slack-install-url: https://slack.com/oauth/v2/authorize?...
 ```
 
+## Notification channels
+
+`type` is `smtp` or `slack`. SMTP channels use STARTTLS on the port you give
+(587 is typical); port 465 is also supported and starts TLS immediately.
+Delivery attempts time out rather than hanging indefinitely.
+
 ## Monitor values
 
 `frequency` (seconds between checks) must be one of **10, 30, 60, 300, 900**,

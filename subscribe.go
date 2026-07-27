@@ -153,14 +153,18 @@ func slackOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	form.Add("client_id", slackInstallURL.Query().Get("client_id"))
 	form.Add("client_secret", settings.SlackClientSecret)
 
-	resp, err := http.PostForm("https://slack.com/api/oauth.v2.access", form)
+	// http.PostForm uses the default client, which has no timeout: a slow
+	// response would hold this handler open indefinitely.
+	slackClient := http.Client{Timeout: 30 * time.Second}
+
+	resp, err := slackClient.PostForm("https://slack.com/api/oauth.v2.access", form)
 	if err != nil {
 		log.Printf("slackOAuth2Callback.PostForm: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		log.Printf("slackOAuth2Callback.ReadAll: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

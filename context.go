@@ -132,8 +132,13 @@ func securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := w.Header()
 		header.Set("X-Content-Type-Options", "nosniff")
-		header.Set("X-Frame-Options", "SAMEORIGIN")
 		header.Set("Referrer-Policy", "same-origin")
+
+		// Framing is only denied where clicks are dangerous. Status pages get
+		// embedded in other people's dashboards on purpose.
+		if isAuthenticatedArea(r.URL.Path) {
+			header.Set("X-Frame-Options", "SAMEORIGIN")
+		}
 
 		if requestIsHTTPS(r) {
 			header.Set("Strict-Transport-Security", "max-age=31536000")
@@ -141,6 +146,17 @@ func securityHeaders(h http.Handler) http.Handler {
 
 		h.ServeHTTP(w, r)
 	})
+}
+
+// isAuthenticatedArea reports whether a path belongs to the admin surface.
+func isAuthenticatedArea(path string) bool {
+	for _, prefix := range []string{"/admin", "/login", "/logout", "/setup"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // requestIsHTTPS reports whether the browser reached Statusnook over TLS,
