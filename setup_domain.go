@@ -136,11 +136,7 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 	domainParam := strings.ToLower(r.PostFormValue("domain"))
 	if domainParam == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-				Domain is required
-			</div>
-		`))
+		w.Write(alertOOBClass("Domain is required", "domain-alert"))
 		return
 	}
 
@@ -148,31 +144,19 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 
 	if strings.Contains(domainParam, "/") {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-				It looks like you've entered a URL, please enter a domain
-			</div>
-		`))
+		w.Write(alertOOBClass("It looks like you've entered a URL, please enter a domain", "domain-alert"))
 		return
 	}
 
 	if net.ParseIP(domainParam).String() != "<nil>" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-				It looks like you've entered an IP address, please enter a domain
-			</div>
-		`))
+		w.Write(alertOOBClass("It looks like you've entered an IP address, please enter a domain", "domain-alert"))
 		return
 	}
 
 	if !domainPattern.MatchString(domainParam) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-				Invalid domain
-			</div>
-		`))
+		w.Write(alertOOBClass("Invalid domain", "domain-alert"))
 		return
 	}
 
@@ -181,42 +165,13 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSetupDomain.lookupDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`
-				<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-					An unhandled error occurred
-				</div>
-			`))
+			w.Write(alertOOBClass("An unhandled error occurred", "domain-alert"))
 			return
 		}
 
 		if !found {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`
-				<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-					<span>
-						We didn't find your domain's A record, verify it exists and then retry
-					</span>
-
-					<span>
-						If your domain and A record is correct, you might need to wait a few minutes before retrying
-					</span>
-				</div>
-
-				<div id="skip-domain-setup" class="skip-domain-setup" hx-swap-oob="true">
-					<p>We can also monitor things in the background and redirect you when your domain is ready</p>
-					<form onsubmit="onSubmitSkipDomain(this);" hx-post="/setup/skip-domain" hx-swap="none">
-						<input name="domain" type="hidden">
-						<button>Skip ahead</button>
-					</form>
-
-					<script>
-						function onSubmitSkipDomain(form) {
-							const domain = document.querySelector(".setup-domain").elements.domain.value;
-							form.elements.domain.value = domain;
-						}
-					</script>
-				</div>
-			`))
+			w.Write(renderFragment("fragment_domain_a_record.html", nil))
 			return
 		}
 
@@ -226,38 +181,18 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &acmeProblem) {
 				if msg, ok := acmeProblemTypeMessages[acmeProblem.Type]; ok {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(
-						fmt.Sprintf(`
-							<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-								%s
-							</div>
-						`,
-							msg,
-						),
-					))
+					w.Write(alertOOBClass(msg, "domain-alert"))
 					return
 				}
 
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(
-					fmt.Sprintf(`
-						<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-							An unhandled error occurred %s
-						</div>
-						`,
-						acmeProblem.Type,
-					),
-				))
+				w.Write(alertOOBClass("An unhandled error occurred "+acmeProblem.Type, "domain-alert"))
 				return
 			}
 
 			log.Printf("postSetupDomain.ManageSync: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`
-				<div id="alert" class="alert domain-alert" hx-swap-oob="true">
-					An unexpected error occurred
-				</div>
-			`))
+			w.Write(alertOOBClass("An unexpected error occurred", "domain-alert"))
 			return
 		}
 	}

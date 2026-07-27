@@ -116,10 +116,18 @@ func TestNoMarkupInGoSources(t *testing.T) {
 	// sit inside every handler.
 	markupConst := regexp.MustCompile("(?m)^\t*const (markup|rootTmpl|\\w*Markup|emailTmpl) = `")
 
+	// A response body written as inline markup, which is what the htmx
+	// fragments in templates/fragment_*.html replaced.
+	inlineMarkup := regexp.MustCompile("(?s)Write\\(\\[\\]byte\\(`\\s*<")
+
 	for path, source := range goSources(t) {
 		assert.NotRegexp(
 			t, markupConst, source,
 			"%s declares a template literal; move it to templates/", path,
+		)
+		assert.NotRegexp(
+			t, inlineMarkup, source,
+			"%s writes inline markup; add a templates/fragment_*.html instead", path,
 		)
 	}
 }

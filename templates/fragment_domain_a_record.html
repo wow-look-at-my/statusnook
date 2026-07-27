@@ -1,0 +1,26 @@
+
+				<div id="alert" class="alert domain-alert" hx-swap-oob="true">
+					<span>
+						We didn't find your domain's A record, verify it exists and then retry
+					</span>
+
+					<span>
+						If your domain and A record is correct, you might need to wait a few minutes before retrying
+					</span>
+				</div>
+
+				<div id="skip-domain-setup" class="skip-domain-setup" hx-swap-oob="true">
+					<p>We can also monitor things in the background and redirect you when your domain is ready</p>
+					<form onsubmit="onSubmitSkipDomain(this);" hx-post="/setup/skip-domain" hx-swap="none">
+						<input name="domain" type="hidden">
+						<button>Skip ahead</button>
+					</form>
+
+					<script>
+						function onSubmitSkipDomain(form) {
+							const domain = document.querySelector(".setup-domain").elements.domain.value;
+							form.elements.domain.value = domain;
+						}
+					</script>
+				</div>
+			

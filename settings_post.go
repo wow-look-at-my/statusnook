@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/mholt/acmez/acme"
-	"html"
 	"log"
 	"net"
 	"net/http"
@@ -59,16 +58,9 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 
 		metaName = name
 
-		escapedName := html.EscapeString(metaName)
-
-		w.Write([]byte(
-			fmt.Sprintf(`
-				<input id="name" name="name" value="%s" hx-swap-oob="true" disabled>
-				<a id="nook-name" href="/" hx-boost="true" hx-swap-oob="true">%s</a>
-			`,
-				escapedName,
-				escapedName,
-			),
+		w.Write(renderFragment(
+			"fragment_settings_name.html",
+			struct{ Name string }{metaName},
 		))
 
 		return
@@ -80,13 +72,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("postSettings.BeginUnmanagedDomain: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 			defer tx.Rollback()
@@ -95,13 +81,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("postSettings.updateMetaValueDomainUnmanaged: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 
@@ -109,13 +89,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("postSettings.CommitUnmanagedDomain: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 
@@ -130,13 +104,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("postSettings.BeginUnconfirmedDomainUpdate: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 			defer tx.Rollback()
@@ -145,26 +113,14 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("postSettings.updateMetaValueUnconfirmedDomainUpdate: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 
 			if err := tx.Commit(); err != nil {
 				log.Printf("postSettings.CommitUnconfirmedDomainUpdate: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte(
-					`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-				))
+				w.Write(bannerOOB("An unexpected error occurred"))
 				return
 			}
 
@@ -175,31 +131,19 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 
 		if strings.Contains(domain, "/") {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`
-				<div id="banner" class="banner" hx-swap-oob="true">
-					It looks like you've entered a URL, please enter a domain
-				</div>
-			`))
+			w.Write(bannerOOB("It looks like you've entered a URL, please enter a domain"))
 			return
 		}
 
 		if net.ParseIP(domain).String() != "<nil>" {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`
-				<div id="banner" class="banner" hx-swap-oob="true">
-					It looks like you've entered an IP address, please enter a domain
-				</div>
-			`))
+			w.Write(bannerOOB("It looks like you've entered an IP address, please enter a domain"))
 			return
 		}
 
 		if !domainPattern.MatchString(domain) {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`
-				<div id="banner" class="banner" hx-swap-oob="true">
-					Invalid domain
-				</div>
-			`))
+			w.Write(bannerOOB("Invalid domain"))
 			return
 		}
 
@@ -207,13 +151,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSettings.lookupDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unexpected error occurred"))
 			return
 		}
 
@@ -226,13 +164,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblemNotFound: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							<span>An unexpected error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("An unexpected error occurred"))
 					return
 				}
 				defer tx.Rollback()
@@ -241,26 +173,14 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					log.Printf("postSettings.updateMetaValueDomainProblemNotFound: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							<span>An unexpected error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("An unexpected error occurred"))
 					return
 				}
 
 				if err := tx.Commit(); err != nil {
 					log.Printf("postSettings.CommitUnconfirmedDomainProblemNotFound: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							span>An unexpected error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("span>An unexpected error occurred"))
 					return
 				}
 
@@ -301,13 +221,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblem: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							<span>An unexpected error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("An unexpected error occurred"))
 					return
 				}
 				defer tx.Rollback()
@@ -316,26 +230,14 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					log.Printf("postSettings.updateMetaValueDomainProblem: %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							<span>An unhandled error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("An unhandled error occurred"))
 					return
 				}
 
 				if err := tx.Commit(); err != nil {
 					log.Printf("postSettings.CommitUnconfirmedDomainProblem %s", err)
 					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(
-						`
-						<div id="banner" class="banner" hx-swap-oob="true">
-							<span>An unhandled error occurred</span>
-						</div>
-					`,
-					))
+					w.Write(bannerOOB("An unhandled error occurred"))
 					return
 				}
 
@@ -364,13 +266,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSettings.BeginDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unexpected error occurred"))
 			return
 		}
 		defer tx.Rollback()
@@ -379,13 +275,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSettings.updateMetaValueDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unexpected error occurred"))
 			return
 		}
 
@@ -393,13 +283,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSettings.updateMetaValueUnconfirmedDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unexpected error occurred"))
 			return
 		}
 
@@ -407,26 +291,14 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("postSettings.updateMetaValueUnconfirmedDomainProblem: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unexpected error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unexpected error occurred"))
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
 			log.Printf("postSettings.CommitDomain: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(
-				`
-					<div id="banner" class="banner" hx-swap-oob="true">
-						<span>An unhandled error occurred</span>
-					</div>
-				`,
-			))
+			w.Write(bannerOOB("An unhandled error occurred"))
 			return
 		}
 

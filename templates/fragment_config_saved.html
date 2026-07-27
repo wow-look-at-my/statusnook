@@ -1,0 +1,7 @@
+<div id="save-overlay-errors" class="save-overlay-errors" hx-swap-oob="true"></div>
+<div id="update-config" hx-swap-oob="true">
+	<script>
+		document.querySelector("#save-overlay").style.display = "none";
+		window.configFile = "{{.Config}}";
+	</script>
+</div>

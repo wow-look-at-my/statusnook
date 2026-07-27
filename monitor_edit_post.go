@@ -96,11 +96,7 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 
 	if !validURL {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<span id="alert-error" hx-swap-oob="true">
-				Invalid URL
-			</span>
-		`))
+		w.Write(inlineErrorOOB("Invalid URL"))
 		return
 	}
 

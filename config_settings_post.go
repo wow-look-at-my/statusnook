@@ -12,14 +12,6 @@ import (
 	"strings"
 )
 
-// alertOOB renders an out-of-band alert box for htmx to swap in.
-func alertOOB(message string) []byte {
-	return []byte(fmt.Sprintf(
-		`<div id="alert" class="alert" hx-swap-oob="true">%s</div>`,
-		message,
-	))
-}
-
 func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 	if env.GitHub.Managed() {
 		w.WriteHeader(http.StatusBadRequest)
@@ -232,21 +224,8 @@ func postGenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 
 	token := base64.StdEncoding.EncodeToString(tokenBytes)
 
-	w.Write(
-		[]byte(fmt.Sprintf(
-			`<input 
-				id="github-webhook-secret"
-				name="github-webhook-secret"
-				type="password"
-				readonly="true"
-				value="%s"
-				hx-swap-oob="true"
-			>
-			
-			<script>
-				document.getElementById("generate-new-webhook-secret").close();
-			</script>`,
-			token,
-		)),
-	)
+	w.Write(renderFragment(
+		"fragment_webhook_secret.html",
+		struct{ Value string }{token},
+	))
 }

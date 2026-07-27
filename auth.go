@@ -46,11 +46,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 
 	if username == "" || password == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Enter a username and password
-			</div>
-		`))
+		w.Write(alertOOB("Enter a username and password"))
 		return
 	}
 

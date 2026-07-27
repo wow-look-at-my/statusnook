@@ -159,27 +159,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sub.Active {
-		w.Write([]byte(`
-		<dialog id="email-already-subscribed-modal" class="email-already-subscribed-modal success-modal" hx-swap-oob="true">
-			<div>
-				<div>
-					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-						<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
-					</svg>
-				</div>
-				<span>
-					This email address is already subscribed to receive updates
-				</span>
-
-				<button onclick="document.querySelector('.email-already-subscribed-modal').close();">Dismiss</button>
-			</div>
-
-			<script>
-				document.querySelector('.email-updates-modal').close();
-				document.querySelector('.email-already-subscribed-modal').showModal();
-			</script>
-		</dialog>
-		`))
+		w.Write(renderFragment("fragment_already_subscribed.html", nil))
 		return
 	}
 

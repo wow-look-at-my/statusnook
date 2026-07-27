@@ -7,9 +7,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
-	"html"
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -61,42 +58,14 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 
 		formattedErr := strings.TrimPrefix(unwrappedErr.Error(), "yaml: ")
 
-		errMsg := fmt.Sprintf(
-			`<div class="save-overlay save-overlay--error">%s</div>`,
-			html.EscapeString(formattedErr),
-		)
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write(
-			[]byte(fmt.Sprintf(
-				`<div 
-					id="save-overlay-errors"
-					class="save-overlay-errors"
-					hx-swap-oob="true"
-				>
-					%s
-				</div>`,
-				errMsg,
-			)),
-		)
+		w.Write(saveErrorsOOB([]string{formattedErr}))
 		return
 	}
 
 	if len(msgs) > 0 {
-		errors := ""
-		for _, v := range msgs {
-			errors += fmt.Sprintf(
-				`<div class="save-overlay save-overlay--error">%s</div>`,
-				html.EscapeString(v),
-			)
-		}
-
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write(
-			[]byte(fmt.Sprintf(
-				`<div id="save-overlay-errors" class="save-overlay-errors" hx-swap-oob="true">%s</div>`,
-				errors,
-			)),
-		)
+		w.Write(saveErrorsOOB(msgs))
 		return
 	}
 
@@ -122,21 +91,10 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 
 	metaName = name
 
-	w.Write(
-		[]byte(
-			fmt.Sprintf(`
-			<div id="save-overlay-errors" class="save-overlay-errors" hx-swap-oob="true"></div>
-			<div id="update-config" hx-swap-oob="true">
-				<script>
-					document.querySelector("#save-overlay").style.display = "none";
-					window.configFile = "%s";
-				</script>
-			</div>
-			`,
-				template.JSEscapeString(config),
-			),
-		),
-	)
+	w.Write(renderFragment(
+		"fragment_config_saved.html",
+		struct{ Config string }{config},
+	))
 }
 
 func postSecret(w http.ResponseWriter, r *http.Request) {
@@ -208,12 +166,10 @@ func postSecret(w http.ResponseWriter, r *http.Request) {
 		b64Ciphertext := base64.StdEncoding.EncodeToString(ciphertext) + "." +
 			base64.StdEncoding.EncodeToString(nonce)
 
-		w.Write(
-			[]byte(fmt.Sprintf(
-				`<input id="output" placeholder="Output" value="%s" hx-swap-oob="true" disabled>`,
-				"secret_"+html.EscapeString(b64Ciphertext),
-			)),
-		)
+		w.Write(renderFragment(
+			"fragment_secret_output.html",
+			struct{ Value string }{"secret_" + b64Ciphertext},
+		))
 	} else if action == "decrypt" {
 		nonceSplit := strings.Split(input, ".")
 		if len(nonceSplit) != 2 {
@@ -241,11 +197,9 @@ func postSecret(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		w.Write(
-			[]byte(fmt.Sprintf(
-				`<input id="output" placeholder="Output" value="%s" hx-swap-oob="true" disabled>`,
-				html.EscapeString(string(plaintext)),
-			)),
-		)
+		w.Write(renderFragment(
+			"fragment_secret_output.html",
+			struct{ Value string }{string(plaintext)},
+		))
 	}
 }

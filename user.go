@@ -86,11 +86,7 @@ func postEditUser(w http.ResponseWriter, r *http.Request) {
 
 	if password != "retain" && len(password) < 8 {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="password-alert" class="alert alert--field" hx-swap-oob="true">
-				Password must contain at least 8 characters
-			</div>
-		`))
+		w.Write(fieldAlertOOB("password-alert", "Password must contain at least 8 characters"))
 		return
 	}
 
@@ -127,11 +123,7 @@ func postEditUser(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &sqliteErr) {
 				if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(`
-						<div id="username-alert" class="alert alert--field" hx-swap-oob="true">
-							This username is already taken
-						</div>
-					`))
+					w.Write(fieldAlertOOB("username-alert", "This username is already taken"))
 					return
 				}
 			}
@@ -153,11 +145,7 @@ func postEditUser(w http.ResponseWriter, r *http.Request) {
 			if errors.As(err, &sqliteErr) {
 				if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(`
-						<div id="username-alert" class="alert alert--field" hx-swap-oob="true">
-							This username is already taken
-						</div>
-					`))
+					w.Write(fieldAlertOOB("username-alert", "This username is already taken"))
 					return
 				}
 			}

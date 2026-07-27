@@ -126,11 +126,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 	username := r.PostFormValue("username")
 	if username == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Username is required
-			</div>
-		`))
+		w.Write(alertOOB("Username is required"))
 		return
 	}
 
@@ -139,21 +135,13 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 
 	if password != passwordConfirmation {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Passwords do not match
-			</div>
-		`))
+		w.Write(alertOOB("Passwords do not match"))
 		return
 	}
 
 	if len(password) < 8 {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Password must contain at least 8 characters
-			</div>
-		`))
+		w.Write(alertOOB("Password must contain at least 8 characters"))
 		return
 	}
 
@@ -245,11 +233,7 @@ func postSetupName(w http.ResponseWriter, r *http.Request) {
 	name := r.PostFormValue("name")
 	if name == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Name is required
-			</div>
-		`))
+		w.Write(alertOOB("Name is required"))
 		return
 	}
 

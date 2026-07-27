@@ -8,11 +8,23 @@ with htmx. No frontend build step.
 - `go-toolchain --cgo` runs everything: tidy, vet, file-length check, tests,
   build. **CGO is required** (`github.com/mattn/go-sqlite3`); without it the
   package does not compile.
-- Files are capped at 750 lines. Handlers keep their markup in a `const markup`
-  raw string; when that pushes a file over, the literal moves to its own
-  `*_markup.go`.
+- Files are capped at 750 lines.
 - Run it locally: `go-toolchain --cgo` then `./statusnook -port 8000`
   (dev builds listen on 8000 and set `metaSSL=false`).
+
+## Templates
+
+All markup lives in `templates/`, embedded into the binary - never in Go string
+literals (a test enforces this):
+
+- `root.html` - the page layout every page template extends.
+- `<handler>.html` - one page per handler, loaded with `parseTmpl("x.html")`.
+- `*_email.html`, `*_slack.json` - notification bodies (`parseEmailTmpl`,
+  `parseTextTmpl`).
+- `fragment_*.html` - the out-of-band bits htmx swaps in. Render them through
+  the helpers in template.go (`alertOOB`, `bannerOOB`, `fieldAlertOOB`,
+  `inlineErrorOOB`, `saveErrorsOOB`, `renderFragment`), which escape the
+  message rather than concatenating it into markup.
 
 ## Layout
 

@@ -97,11 +97,7 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 	username := r.PostFormValue("username")
 	if username == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Username is required
-			</div>
-		`))
+		w.Write(alertOOB("Username is required"))
 		return
 	}
 
@@ -110,21 +106,13 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 
 	if password != passwordConfirmation {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Passwords do not match
-			</div>
-		`))
+		w.Write(alertOOB("Passwords do not match"))
 		return
 	}
 
 	if len(password) < 8 {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`
-			<div id="alert" class="alert" hx-swap-oob="true">
-				Password must contain at least 8 characters
-			</div>
-		`))
+		w.Write(alertOOB("Password must contain at least 8 characters"))
 		return
 	}
 
@@ -141,11 +129,7 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &sqliteErr) {
 			if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte(`
-					<div id="alert" class="alert" hx-swap-oob="true">
-						This username is already taken
-					</div>
-				`))
+				w.Write(alertOOB("This username is already taken"))
 				return
 			}
 		}
