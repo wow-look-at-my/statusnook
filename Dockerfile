@@ -1,10 +1,8 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 
 WORKDIR /src
-
-RUN apk add --no-cache gcc musl-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -15,8 +13,8 @@ COPY templates/ ./templates
 COPY migrations/ ./migrations
 COPY schema.sql ./
 
-# CGO is required by the SQLite driver.
-RUN CGO_ENABLED=1 go build -trimpath -o /out/statusnook \
+# The SQLite driver is pure Go, so this is a static build with no C toolchain.
+RUN CGO_ENABLED=0 go build -trimpath -o /out/statusnook \
     -ldflags "-w -s \
     -X main.CA=https://acme-v02.api.letsencrypt.org/directory \
     -X main.BUILD=release"

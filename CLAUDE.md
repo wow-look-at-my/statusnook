@@ -5,11 +5,11 @@ with htmx. No frontend build step.
 
 ## Build and test
 
-- `go-toolchain --cgo` runs everything: tidy, vet, file-length check, tests,
-  build. **CGO is required** (`github.com/mattn/go-sqlite3`); without it the
-  package does not compile.
+- `go-toolchain` runs everything: tidy, vet, file-length check, tests, build.
+  No CGO: the SQLite driver is pure Go (`modernc.org/sqlite`), so builds are
+  static and cross-compile without a C toolchain.
 - Files are capped at 750 lines.
-- Run it locally: `go-toolchain --cgo` then `./statusnook -port 8000`
+- Run it locally: `go-toolchain` then `./statusnook -port 8000`
   (dev builds listen on 8000 and set `metaSSL=false`).
 - Tests use the real routing table via `newRouter()` and a temporary database
   (`useTestDBs`, `newTestServer`). Coverage is enforced at 80% by the toolchain
@@ -42,7 +42,8 @@ Handlers, their SQL helpers and their markup sit together.
 - `config_github.go` - push webhook (HMAC verified, branch filtered).
 - `config_apply*.go` - `applyConfig` as ordered steps on a `configApplier`.
 - `config_generate.go` - the reverse: database to YAML.
-- `db.go` - data dir, DSN, schema bootstrap, migrations from `migrations/`.
+- `db.go` - data dir, DSN (`databaseDSN`, whose pragmas are load-bearing),
+  schema bootstrap, migrations from `migrations/`, `isConstraintErr`.
 - `context.go` - middleware, page context, session cookie construction.
 - `monitor_loop.go`, `notification_loop.go`, `health.go` - background loops.
 

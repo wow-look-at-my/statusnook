@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/mattn/go-sqlite3"
 	"strings"
 )
 
@@ -58,17 +57,13 @@ func (a *configApplier) applyRenames() error {
 		if entityType == "services" {
 			_, err := updateServiceSlug(tx, src, v)
 			if err != nil {
-				var sqliteErr sqlite3.Error
-
 				if errors.Is(err, sql.ErrNoRows) {
 					validSrc = false
 					if validRename {
 						renameSrcMsg(k)
 					}
-				} else if errors.As(err, &sqliteErr) {
-					if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
-						duplicateSlugMsg("services", v)
-					}
+				} else if isConstraintErr(err) {
+					duplicateSlugMsg("services", v)
 				} else {
 					return fmt.Errorf("applyConfig.updateServiceSlug: %w", err)
 				}
@@ -82,17 +77,13 @@ func (a *configApplier) applyRenames() error {
 		} else if entityType == "notification-channels" {
 			_, err := updateNotificationChannelSlug(tx, src, v)
 			if err != nil {
-				var sqliteErr sqlite3.Error
-
 				if errors.Is(err, sql.ErrNoRows) {
 					validSrc = false
 					if validRename {
 						renameSrcMsg(k)
 					}
-				} else if errors.As(err, &sqliteErr) {
-					if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
-						duplicateSlugMsg("services", v)
-					}
+				} else if isConstraintErr(err) {
+					duplicateSlugMsg("services", v)
 				} else {
 					return fmt.Errorf("applyConfig.updateNotificationChannelSlug: %w", err)
 				}
@@ -106,17 +97,13 @@ func (a *configApplier) applyRenames() error {
 		} else if entityType == "mail-groups" {
 			_, err := updateMailGroupSlug(tx, src, v)
 			if err != nil {
-				var sqliteErr sqlite3.Error
-
 				if errors.Is(err, sql.ErrNoRows) {
 					validSrc = false
 					if validRename {
 						renameSrcMsg(k)
 					}
-				} else if errors.As(err, &sqliteErr) {
-					if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
-						duplicateSlugMsg("services", v)
-					}
+				} else if isConstraintErr(err) {
+					duplicateSlugMsg("services", v)
 				} else {
 					return fmt.Errorf("applyConfig.updateMailGrouplug: %w", err)
 				}
@@ -130,17 +117,13 @@ func (a *configApplier) applyRenames() error {
 		} else if entityType == "monitors" {
 			_, err := updateMonitorSlug(tx, src, v)
 			if err != nil {
-				var sqliteErr sqlite3.Error
-
 				if errors.Is(err, sql.ErrNoRows) {
 					validSrc = false
 					if validRename {
 						renameSrcMsg(k)
 					}
-				} else if errors.As(err, &sqliteErr) {
-					if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
-						duplicateSlugMsg("services", v)
-					}
+				} else if isConstraintErr(err) {
+					duplicateSlugMsg("services", v)
 				} else {
 					return fmt.Errorf("applyConfig.updateMonitorSlug: %w", err)
 				}

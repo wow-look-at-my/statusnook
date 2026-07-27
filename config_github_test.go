@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -74,14 +73,11 @@ func useTestDBs(t *testing.T) {
 
 	env = envConfig{DataDir: dir}
 
-	dsn := "file:" + filepath.Join(dir, "app.db") +
-		"?_foreign_keys=on&_journal_mode=wal&_busy_timeout=5000"
-
 	var err error
-	db, err = openTestDB(dsn)
+	db, err = openTestDB(databaseDSN(dir, false))
 	require.NoError(t, err)
 
-	rwDB, err = openTestDB(dsn + "&_txlock=immediate")
+	rwDB, err = openTestDB(databaseDSN(dir, true))
 	require.NoError(t, err)
 	rwDB.SetMaxOpenConns(1)
 

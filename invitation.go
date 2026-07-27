@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"github.com/go-chi/chi/v5"
-	"github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
 	"log"
 	"net/http"
@@ -125,13 +124,10 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 
 	userID, err := createUser(tx, username, string(pwHash))
 	if err != nil {
-		var sqliteErr sqlite3.Error
-		if errors.As(err, &sqliteErr) {
-			if errors.Is(sqliteErr.Code, sqlite3.ErrConstraint) {
-				w.WriteHeader(http.StatusBadRequest)
-				w.Write(alertOOB("This username is already taken"))
-				return
-			}
+		if isConstraintErr(err) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(alertOOB("This username is already taken"))
+			return
 		}
 		log.Printf("postInvitation.createUser: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

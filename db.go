@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -13,6 +14,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"modernc.org/sqlite"
+	sqlite3lib "modernc.org/sqlite/lib"
 )
 
 func Migration1715019045AddSlugColumns(tx *sql.Tx) error {
@@ -75,6 +79,38 @@ func dataDir() string {
 	return dir
 }
 
+// isConstraintErr reports whether err is a SQLite constraint violation, which
+// in this schema always means a duplicate slug or username. SQLite reports
+// extended result codes whose low byte is the primary code.
+func isConstraintErr(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+
+	return sqliteErr.Code()&0xff == sqlite3lib.SQLITE_CONSTRAINT
+}
+
+// databaseDSN builds the connection string. The pragmas are load-bearing:
+// foreign_keys drives every "on delete cascade" in the schema, wal lets readers
+// run while a write is in flight, and busy_timeout stops a concurrent writer
+// failing outright with "database is locked".
+//
+// This is the pure-Go driver's pragma syntax; the C driver used
+// _foreign_keys=on&_journal_mode=wal style, which this driver ignores.
+func databaseDSN(dir string, immediate bool) string {
+	dsn := "file:" + filepath.Join(dir, "app.db") +
+		"?_pragma=foreign_keys(1)" +
+		"&_pragma=journal_mode(wal)" +
+		"&_pragma=busy_timeout(5000)"
+
+	if immediate {
+		dsn += "&_txlock=immediate"
+	}
+
+	return dsn
+}
+
 func initDB(immediate bool) *sql.DB {
 	dir := dataDir()
 
@@ -82,14 +118,7 @@ func initDB(immediate bool) *sql.DB {
 		log.Fatalf("initDB.MkdirAll: %s", err)
 	}
 
-	// _busy_timeout keeps a concurrent writer from failing outright with
-	// "database is locked" while another transaction commits.
-	dsn := "file:" + filepath.Join(dir, "app.db") +
-		"?_foreign_keys=on&_journal_mode=wal&_busy_timeout=5000"
-	if immediate {
-		dsn += "&_txlock=immediate"
-	}
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", databaseDSN(dir, immediate))
 	if err != nil {
 		log.Fatalf("initDB.Open: %s", err)
 	}

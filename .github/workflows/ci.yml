@@ -18,6 +18,3 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: wow-look-at-my/go-toolchain@v1
-        with:
-          # github.com/mattn/go-sqlite3 does not compile without cgo.
-          cgo: true

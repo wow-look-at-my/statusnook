@@ -4,20 +4,21 @@ import (
 	"database/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"strings"
 	"testing"
 	"time"
 )
 
-// openTestDB opens a database with the sqlite3 driver the app registers.
+// openTestDB opens a database with the pure-Go sqlite driver the app registers.
 func openTestDB(dsn string) (*sql.DB, error) {
-	return sql.Open("sqlite3", dsn)
+	return sql.Open("sqlite", dsn)
 }
 
 // testDB returns an empty in-memory database with the production schema.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	require.Nil(t, err)
 
 	t.Cleanup(func() { db.Close() })
@@ -108,4 +109,53 @@ func TestSessionExpiry(t *testing.T) {
 	_, _, err = validateSession(tx, "fresh")
 	assert.Nil(t, err)
 
+}
+
+// TestDatabasePragmas guards the settings the DSN carries. They are easy to
+// lose silently: the pure-Go driver ignores the C driver's pragma syntax, and
+// without foreign_keys every "on delete cascade" in the schema stops working.
+func TestDatabasePragmas(t *testing.T) {
+	useTestDBs(t)
+
+	for name, handle := range map[string]*sql.DB{"read": db, "write": rwDB} {
+		t.Run(name, func(t *testing.T) {
+			foreignKeys := 0
+			require.NoError(t, handle.QueryRow("pragma foreign_keys").Scan(&foreignKeys))
+			assert.Equal(t, 1, foreignKeys, "foreign keys must be enforced")
+
+			journalMode := ""
+			require.NoError(t, handle.QueryRow("pragma journal_mode").Scan(&journalMode))
+			assert.Equal(t, "wal", strings.ToLower(journalMode))
+
+			busyTimeout := 0
+			require.NoError(t, handle.QueryRow("pragma busy_timeout").Scan(&busyTimeout))
+			assert.Equal(t, 5000, busyTimeout)
+		})
+	}
+}
+
+// TestCascadeDeletes proves the foreign keys actually cascade, which is how the
+// app cleans up a deleted monitor's logs and a deleted alert's messages.
+func TestCascadeDeletes(t *testing.T) {
+	useTestDBs(t)
+
+	tx, err := rwDB.Begin()
+	require.NoError(t, err)
+
+	monitorID, err := createMonitor(tx, "example", "Example", "https://example.com", "GET",
+		60, 5, 1, sql.NullString{}, sql.NullString{}, sql.NullString{})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	logID, err := createMonitorLog(tx, now, now, 200, sql.NullString{}, 1, "success", monitorID)
+	require.NoError(t, err)
+	require.NoError(t, createMonitorLogLastChecked(tx, now, monitorID, logID))
+	require.NoError(t, deleteMonitorByID(tx, monitorID))
+	require.NoError(t, tx.Commit())
+
+	for _, table := range []string{"monitor", "monitor_log", "monitor_log_last_checked"} {
+		count := 0
+		require.NoError(t, db.QueryRow("select count(*) from "+table).Scan(&count))
+		assert.Zero(t, count, "%s rows survived the monitor delete", table)
+	}
 }
