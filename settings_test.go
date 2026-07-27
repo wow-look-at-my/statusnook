@@ -1,9 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +17,7 @@ func metaValue(t *testing.T, key string) string {
 	t.Helper()
 
 	value := ""
-	require.NoError(t, db.QueryRow("select value from meta where key = ?", key).Scan(&value))
+	require.NoError(t, db.QueryRow("select value from meta where name = ?", key).Scan(&value))
 
 	return value
 }
@@ -107,7 +109,15 @@ func TestSettingsDomainValidation(t *testing.T) {
 	}
 
 	assert.Empty(t, metaUnconfirmedDomain, "a rejected domain must not be stored")
-	assert.Empty(t, metaValue(t, "unconfirmedDomain"))
+
+	// No row at all is the strongest form of "nothing was stored".
+	stored := ""
+	err := db.QueryRow("select value from meta where name = 'unconfirmedDomain'").Scan(&stored)
+	if err == nil {
+		assert.Empty(t, stored)
+	} else {
+		assert.ErrorIs(t, err, sql.ErrNoRows)
+	}
 }
 
 // TestSettingsCancelDomain covers abandoning the verification of a domain that
@@ -132,7 +142,9 @@ func TestSettingsPageShowsEnvOwnership(t *testing.T) {
 
 	env.Name = "From The Environment"
 	env.Domain = "env.example.com"
-	env.GitHub = gitHubEnvConfig{Repo: "acme/config", Path: "statusnook.yaml"}
+	env.GitHub = gitHubEnvConfig{
+		Repo: "acme/config", Path: "statusnook.yaml", Token: "token", PollInterval: time.Minute,
+	}
 	t.Cleanup(func() {
 		env.Name, env.Domain, env.GitHub = "", "", gitHubEnvConfig{}
 	})
@@ -142,6 +154,6 @@ func TestSettingsPageShowsEnvOwnership(t *testing.T) {
 
 	config := ts.get("/admin/settings/config-settings")
 	require.Equal(t, http.StatusOK, config.code)
-	assert.Contains(t, config.body, "acme/config")
-	assert.Contains(t, config.body, "STATUSNOOK_GITHUB_REPO")
+	assert.Contains(t, config.body, "STATUSNOOK_GITHUB_*")
+	assert.Contains(t, config.body, "Polled every 1m0s")
 }
