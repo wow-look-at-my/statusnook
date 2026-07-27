@@ -103,61 +103,7 @@ func monitors(w http.ResponseWriter, r *http.Request) {
 		monitorHappy[v.ID] = v.ResponseCode.Int32 != 0 && v.ResponseCode.Int32 < 400
 	}
 
-	const markup = `
-		{{define "title"}}Monitors{{end}}
-		{{define "body"}}
-			<div class="admin-nav-header">
-				<div>
-					<h2>Monitors</h2>
-				</div>
-
-				{{if not .Ctx.ConfigFile}}
-					<div>
-						<a href="/admin/monitors/create" hx-boost="true">
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-								<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-							</svg>
-						</a>
-					</div>
-				{{end}}
-			</div>
-
-			{{if eq (len .Monitors) 0}}
-				<div class="entity-empty-state">
-					<div class="icon">
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-							<path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" />
-							<path fill-rule="evenodd" d="M.664 10.59a1.651 1.651 0 010-1.186A10.004 10.004 0 0110 3c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0110 17c-4.257 0-7.893-2.66-9.336-6.41zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd" />
-						</svg>
-					</div>
-					<span>Create your first monitor</span>
-					{{if not .Ctx.ConfigFile}}
-						<a class="action" href="/admin/monitors/create" hx-boost="true">Create monitor</a>
-					{{else}}
-						<a class="action" href="/admin/settings#config-form" hx-boost="true">Go to settings</a>
-					{{end}}
-				</div>
-			{{else}}
-				<div class="monitors-container">
-					{{range $monitor := .Monitors}}
-						<a hx-boost="true" href="/admin/monitors/{{$monitor.ID}}">
-							<div>
-								<span>{{$monitor.Name}}</span>
-								<span>{{$monitor.URL}}</span>
-							</div>
-							{{if index $.MonitorHappy $monitor.ID}}
-								<span class="badge">OK</span>
-							{{else}}
-								<span class="badge badge--error">Error</span>
-							{{end}}
-						</a>
-					{{end}}
-				</div>
-			{{end}}
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("monitors", markup)
+	tmpl, err := parseTmpl("monitors.html")
 	if err != nil {
 		log.Printf("monitors.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

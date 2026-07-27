@@ -1,0 +1,125 @@
+
+		{{define "title"}}{{.Alert.Title}} - Alert{{end}}
+		{{define "body"}}
+			<div class="alert-container">
+				<div class="admin-nav-header">
+					<div>
+						<a href="/admin/alerts" hx-boost="true">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+								<path fill-rule="evenodd" d="M11.78 5.22a.75.75 0 0 1 0 1.06L8.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd" />
+							</svg>
+						</a>
+						{{if not .Alert.EndedAt }}
+							{{if eq .Alert.AlertType "incident"}}
+								<div class="live">LIVE</div>
+							{{else}}
+								<div class="active">ACTIVE</div>
+							{{end}}
+						{{end}}
+						<h2>{{.Alert.Title}}</h2>
+					</div>
+					<div>
+						<div class="menu">
+							<button class="menu-button">
+								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none">
+									<path d="M5.99961 1.80005C6.2383 1.80005 6.46722 1.89487 6.63601 2.06365C6.80479 2.23244 6.89961 2.46135 6.89961 2.70005C6.89961 2.93874 6.80479 3.16766 6.63601 3.33645C6.46722 3.50523 6.2383 3.60005 5.99961 3.60005C5.76091 3.60005 5.532 3.50523 5.36321 3.33645C5.19443 3.16766 5.09961 2.93874 5.09961 2.70005C5.09961 2.46135 5.19443 2.23244 5.36321 2.06365C5.532 1.89487 5.76091 1.80005 5.99961 1.80005ZM5.99961 5.10005C6.2383 5.10005 6.46722 5.19487 6.63601 5.36365C6.80479 5.53244 6.89961 5.76135 6.89961 6.00005C6.89961 6.23874 6.80479 6.46766 6.63601 6.63645C6.46722 6.80523 6.2383 6.90005 5.99961 6.90005C5.76091 6.90005 5.532 6.80523 5.36321 6.63645C5.19443 6.46766 5.09961 6.23874 5.09961 6.00005C5.09961 5.76135 5.19443 5.53244 5.36321 5.36365C5.532 5.19487 5.76091 5.10005 5.99961 5.10005ZM6.89961 9.30005C6.89961 9.06135 6.80479 8.83244 6.63601 8.66365C6.46722 8.49487 6.2383 8.40005 5.99961 8.40005C5.76091 8.40005 5.532 8.49487 5.36321 8.66365C5.19443 8.83244 5.09961 9.06135 5.09961 9.30005C5.09961 9.53874 5.19443 9.76766 5.36321 9.93645C5.532 10.1052 5.76091 10.2 5.99961 10.2C6.2383 10.2 6.46722 10.1052 6.63601 9.93645C6.80479 9.76766 6.89961 9.53874 6.89961 9.30005Z" fill="#595959"/>
+								</svg>
+							</button>
+
+							<dialog>
+								{{if .Alert.EndedAt}}
+									<button onclick="document.getElementById('unresolve-dialog').showModal();">Unresolve</button>
+								{{else}}
+									<button onclick="document.getElementById('resolve-dialog').showModal();">Resolve</button>
+								{{end}}
+								<a href="/admin/alerts/{{.Alert.ID}}/edit" hx-boost="true">Edit</a>
+								<button onclick="document.getElementById('delete-dialog').showModal();">Delete</button>
+							</dialog>
+						</div>
+
+						<dialog class="modal" id="resolve-dialog">
+							<span>Resolve {{.Alert.Title}}</span>
+							<form hx-post="/admin/alerts/{{.Alert.ID}}/resolve" hx-swap="none">
+								<div>
+									<button onclick="document.getElementById('resolve-dialog').close(); return false;">Cancel</button>
+									<button><span></span>Resolve</button>
+								</div>
+							</form>
+					 	</dialog>
+
+						<dialog class="modal" id="unresolve-dialog">
+							<span>Unresolve {{.Alert.Title}}</span>
+							<form hx-post="/admin/alerts/{{.Alert.ID}}/unresolve" hx-swap="none">
+								<div>
+									<button onclick="document.getElementById('unresolve-dialog').close(); return false;">Cancel</button>
+									<button><span></span>Unresolve</button>
+								</div>
+							</form>
+					  	</dialog>
+
+						<dialog class="modal" id="delete-dialog">
+							<span>Delete {{.Alert.Title}}</span>
+							<form hx-delete hx-swap="none">
+								<div>
+									<button onclick="document.getElementById('delete-dialog').close(); return false;">Cancel</button>
+									<button><span></span>Delete</button>
+								</div>
+							</form>
+					 	</dialog>
+					</div>
+				</div>
+				<div class="alert-services">
+					<h2>Affected services</h2>
+					<div>
+						<span>{{.Services}}</span>
+					</div>
+				</div>
+				<div class="alert-container-messages">
+					<div>
+						<h2>Timeline</h2>
+						<div>
+							<a href="/admin/alerts/{{.Alert.ID}}/messages" hx-boost="true">
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+									<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+								</svg>
+							</a>
+						</div>
+					</div>
+					<div>
+						{{range $message := .Alert.Messages}}
+							<div>
+								<div>
+									<span>{{$message.CreatedAt}}</span>
+									<div>
+										<div class="menu">
+											<button class="menu-button">
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+													<path d="M3 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM8.5 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM15.5 8.5a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" />
+												</svg>
+											</button>
+
+											<dialog class="message-menu-options">
+												<a href="/admin/alerts/{{$.Alert.ID}}/messages/{{$message.ID}}" hx-boost="true">Edit</a>
+												<button onclick="document.getElementById('delete-message-{{$message.ID}}').showModal();">Delete</button>
+											</dialog>
+										</div>
+
+										<dialog class="modal" id="delete-message-{{$message.ID}}">
+											<span>Delete message</span>
+											<form hx-delete="/admin/alerts/{{$.Alert.ID}}/messages/{{$message.ID}}" hx-swap="none">
+												<div>
+													<button onclick="document.getElementById('delete-message-{{$message.ID}}').close(); return false;">Cancel</button>
+													<button><span></span>Delete</button>
+												</div>
+											</form>
+					 					</dialog>
+									</div>
+								</div>
+								<span>{{$message.Content}}</span>
+							</div>
+						{{end}}
+					</div>
+				</div>
+			</div>
+		{{end}}
+	

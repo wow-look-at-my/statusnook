@@ -11,6 +11,7 @@ RUN go mod download
 
 COPY *.go ./
 COPY static/ ./static
+COPY templates/ ./templates
 COPY migrations/ ./migrations
 COPY schema.sql ./
 

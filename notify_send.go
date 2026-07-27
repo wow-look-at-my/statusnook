@@ -109,31 +109,12 @@ func sendMonitorAlertEmail(
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
 	}
 
-	const downMarkup = `
-	{{- .MonitorName}} started failing<br><br>
-
-	{{- if .StatusCode}}
-		{{- "Status code"}}: {{.StatusCode}}<br>
-	{{else}}
-		{{- "Failure reason"}}: {{.Result}}<br>
-	{{- end}}
-	{{- "Checked at"}}: {{.CheckedAt}}<br><br>
-	{{- ""}}<a href="https://{{.Domain}}/admin/monitors/{{.MonitorID}}">View monitor</a>
-`
-
-	const upMarkup = `
-	{{- .MonitorName}} started succeeding<br><br>
-
-	{{- "Checked at"}}: {{.CheckedAt}}<br><br>
-	{{- ""}}<a href="https://{{.Domain}}/admin/monitors/{{.MonitorID}}">View monitor</a>
-`
-
-	markup := downMarkup
+	markupFile := "monitor_down_email.html"
 	if status == "up" {
-		markup = upMarkup
+		markupFile = "monitor_up_email.html"
 	}
 
-	tmpl, err := parseEmailTmpl(status+"MonitorSMTP", markup)
+	tmpl, err := parseEmailTmpl(markupFile)
 	if err != nil {
 		return fmt.Errorf("sendMonitorAlertEmail.parseEmailTmplsSMTP: %w", err)
 	}
@@ -198,31 +179,12 @@ func sendMonitorAlertSlack(
 		)
 	}
 
-	const downMarkup = `
-		{{- ":rotating_light:"}} {{.MonitorName}} started failing{{"\n\n"}}
-
-		{{- if .StatusCode}}
-			{{- "Status code"}}: {{.StatusCode}}{{"\n"}}
-		{{else}}
-			{{- "Failure reason"}}: {{.Result}}{{"\n"}}
-		{{- end}}
-		{{- "Checked at"}}: {{.CheckedAt}}{{"\n\n"}}
-		{{- ""}}<https://{{.Domain}}/admin/monitors/{{.MonitorID}}|View monitor>
-	`
-
-	const upMarkup = `
-		{{- ":white_check_mark:"}} {{.MonitorName}} started succeeding{{"\n\n"}}
-
-		{{- "Checked at"}}: {{.CheckedAt}}{{"\n\n"}}
-		{{- ""}}<https://{{.Domain}}/admin/monitors/{{.MonitorID}}|View monitor>
-	`
-
-	markup := downMarkup
+	markupFile := "monitor_down_slack.json"
 	if status == "up" {
-		markup = upMarkup
+		markupFile = "monitor_up_slack.json"
 	}
 
-	tmpl, err := parseTextTmpl(status+"MonitorSlack", markup)
+	tmpl, err := parseTextTmpl(markupFile)
 	if err != nil {
 		return fmt.Errorf("sendMonitorAlertSlack.parseEmailTmplsSlack: %w", err)
 	}

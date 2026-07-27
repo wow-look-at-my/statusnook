@@ -77,7 +77,7 @@ func getEditMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tmpl, err := parseTmpl("getEditMonitor", editMonitorMarkup)
+	tmpl, err := parseTmpl("get_edit_monitor.html")
 	if err != nil {
 		log.Printf("getEditMonitor.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

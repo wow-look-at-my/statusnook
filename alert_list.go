@@ -74,65 +74,7 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		{{define "title"}}Services{{end}}
-		{{define "body"}}
-			<div class="admin-nav-header">
-				<div>
-					<h2>Alerts</h2>
-				</div>
-
-				<div>
-					<a href="/admin/alerts/notifications" hx-boost="true">
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-							<path fill-rule="evenodd" d="M10 2a6 6 0 0 0-6 6c0 1.887-.454 3.665-1.257 5.234a.75.75 0 0 0 .515 1.076 32.91 32.91 0 0 0 3.256.508 3.5 3.5 0 0 0 6.972 0 32.903 32.903 0 0 0 3.256-.508.75.75 0 0 0 .515-1.076A11.448 11.448 0 0 1 16 8a6 6 0 0 0-6-6ZM8.05 14.943a33.54 33.54 0 0 0 3.9 0 2 2 0 0 1-3.9 0Z" clip-rule="evenodd" />
-						</svg>				  
-					</a>
-					<a href="/admin/alerts/create" hx-boost="true">
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
-							<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-						</svg>
-					</a>
-				</div>
-			</div>
-
-			{{if eq (len .Alerts) 0}}
-				<div class="entity-empty-state">
-					<div class="icon">
-						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-							<path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
-				  		</svg>
-					</div>
-					<span>Create your first alert</span>
-					<a class="action" href="/admin/alerts/create" hx-boost="true">Create alert</a>
-				</div>
-			{{else}}
-				<div class="alerts-container">
-					{{range $alert := .Alerts}}
-						<a href="/admin/alerts/{{$alert.ID}}" hx-boost="true">
-							<div>
-								<div>
-									{{if not $alert.EndedAt }}
-										{{if eq $alert.AlertType "incident"}}
-											<div class="live">LIVE</div>
-										{{else}}
-											<div class="active">ACTIVE</div>
-										{{end}}
-									{{end}}
-									<span>{{$alert.CreatedAt}}</span>
-								</div>
-								<div class="swatch" style="background-color: var(--{{$alert.Severity}});">
-								</div>
-							</div>
-							<span>{{$alert.Title}}</span>
-						</a>
-					{{end}}
-				</div>
-			{{end}}
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("alerts", markup)
+	tmpl, err := parseTmpl("alerts.html")
 	if err != nil {
 		log.Printf("alerts.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

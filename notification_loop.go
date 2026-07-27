@@ -152,52 +152,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								Timeout: time.Second * 10,
 							}
 
-							const text = `
-								{
-									"blocks": [
-										{
-											"type": "header",
-											"text": {
-												"type": "plain_text",
-												"text": "{{.Title}}",
-												"emoji": true
-											}
-										},
-										{
-											"type": "section",
-											"text": {
-												"type": "plain_text",
-												"text": "{{.Content}}",
-												"emoji": true
-											}
-										},
-										{
-											"type": "section",
-											"fields": [
-												{
-													"type": "mrkdwn",
-													"text": "*Affected services*\n{{.Services}}"
-												},
-												{{if eq .AlertType "incident"}}
-												{
-													"type": "mrkdwn",
-													"text": "*Severity*\n{{.Severity}}"
-												}
-												{{end}}
-											]
-										},
-										{
-											"type": "section",
-											"text": {
-												"type": "mrkdwn",
-												"text": "<https://{{.Domain}}|Visit status page>"
-											}
-										}
-									]
-								}
-							`
-
-							tmpl, err := parseTextTmpl("alertSlack", text)
+							tmpl, err := parseTextTmpl("alert_slack.json")
 							if err != nil {
 								log.Printf("notificationLoop.parseEmailTmplsSlack: %s", err)
 								return
@@ -300,30 +255,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								)
 							}
 
-							const markup = `The following message was posted for the alert "{{.Notification.AlertTitle}}":<br>
-								{{- .Notification.Content}}<br><br>
-							
-								{{- "Affected services"}}: {{.Notification.AlertServices}}<br>
-								{{if eq .Notification.AlertType "incident"}}
-									{{- "Severity"}}: {{.SeverityEmoji}}<br>
-								{{end}}
-								<br>
-								{{- ""}}<a href="https://{{.Domain}}">Visit status page</a>
-
-								{{if .ManagedSubscriptions}}
-									<br><br>
-									<p style="text-align:center;margin:1em 0 3em">
-										<a 
-											href="https://{{.Domain}}/unsubscribe?token={{.SubToken}}"
-											style="color:#a8aaaf;font-size:12px"
-										>
-											Unsubscribe
-										</a>
-									</p>
-								{{end}}
-							`
-
-							tmpl, err := parseEmailTmpl("alert", markup)
+							tmpl, err := parseEmailTmpl("alert_email.html")
 							if err != nil {
 								log.Printf("notificationLoop.parseEmailTmpls: %s", err)
 								return

@@ -14,45 +14,13 @@ import (
 )
 
 func getLogin(w http.ResponseWriter, r *http.Request) {
-	const markup = `
-		{{define "title"}}Log in{{end}}
-		{{define "body"}}
-			<div class="auth-dialog-container">
-				<div class="auth-dialog">
-					<div>
-						<div>
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-								<path fill-rule="evenodd" d="M8 7a5 5 0 113.61 4.804l-1.903 1.903A1 1 0 019 14H8v1a1 1 0 01-1 1H6v1a1 1 0 01-1 1H3a1 1 0 01-1-1v-2a1 1 0 01.293-.707L8.196 8.39A5.002 5.002 0 018 7zm5-3a.75.75 0 000 1.5A1.5 1.5 0 0114.5 7 .75.75 0 0016 7a3 3 0 00-3-3z" clip-rule="evenodd" />
-					  		</svg>	  
-						</div>
-						<h1>Log in</h1>
-					</div>
-					<form hx-post hx-swap="none">
-						<div id="alert" class="alert" hx-swap-oob></div>
-						<label>
-							Username
-							<input name="username" required />
-						</label>
-
-						<label>
-							Password
-							<input name="password" type="password" required/>
-						</label>
-
-						<button>Confirm</button>
-					</form>
-				</div>
-			</div>
-		{{end}}
-	`
-
 	authCtx := getAuthCtx(r)
 	if authCtx.ID != 0 {
 		http.Redirect(w, r, "/admin/alerts", http.StatusFound)
 		return
 	}
 
-	tmpl, err := parseTmpl("getLogin", markup)
+	tmpl, err := parseTmpl("get_login.html")
 	if err != nil {
 		log.Printf("getLogin.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

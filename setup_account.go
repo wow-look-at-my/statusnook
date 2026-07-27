@@ -11,44 +11,7 @@ import (
 )
 
 func getSetupAccount(w http.ResponseWriter, r *http.Request) {
-	const markup = `
-		{{define "title"}}Create an admin user - Statusnook Setup{{end}}
-		{{define "body"}}
-			<div class="auth-dialog-container">
-				<div class="auth-dialog">
-					<div>
-						<div>
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-								<path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" />
-					  		</svg>			
-						</div>
-						<h1>Create an admin user</h1>
-					</div>
-					<form hx-post hx-swap="none">
-						<div id="alert" class="alert"></div>
-						<label>
-							Username
-							<input name="username" required>
-						</label>
-
-						<label>
-							Password
-							<input name="password" type="password" required>
-						</label>
-					
-						<label>
-							Confirm password
-							<input name="password-confirmation" type="password" required>
-						</label>
-
-						<button>Confirm</button>
-					</form>
-				</div>
-			</div>
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("getSetupAccount", markup)
+	tmpl, err := parseTmpl("get_setup_account.html")
 	if err != nil {
 		log.Printf("getSetup.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -263,37 +226,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func getSetupName(w http.ResponseWriter, r *http.Request) {
-	const markup = `
-		{{define "title"}}Name your nook - Statusnook Setup{{end}}
-		{{define "body"}}
-			<div class="auth-dialog-container">
-				<div class="auth-dialog">
-					<div>
-						<div>
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-								<path fill-rule="evenodd" d="M4.5 2A2.5 2.5 0 0 0 2 4.5v3.879a2.5 2.5 0 0 0 .732 1.767l7.5 7.5a2.5 2.5 0 0 0 3.536 0l3.878-3.878a2.5 2.5 0 0 0 0-3.536l-7.5-7.5A2.5 2.5 0 0 0 8.38 2H4.5ZM5 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" clip-rule="evenodd" />
-							</svg>
-						</div>
-						<h1>Name your nook</h1>
-					</div>
-					<div style="margin-bottom: 6.0rem;">
-						<p style="text-align: center;">This name will be displayed on your status page</p>
-					</div>
-					<form hx-post hx-swap="none">
-						<div id="alert" class="alert" hx-swap-oob></div>
-						<label>
-							Name
-							<input name="name" type="text" placeholder="Statusnook" required>
-						</label>
-
-						<button>Confirm</button>
-					</form>
-				</div>
-			</div>
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("getSetupName", markup)
+	tmpl, err := parseTmpl("get_setup_name.html")
 	if err != nil {
 		log.Printf("getSetup.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

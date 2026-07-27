@@ -183,29 +183,6 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		<dialog id="email-success-modal" class="email-success-modal success-modal" hx-swap-oob="true">
-			<div>
-				<div>
-					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-						<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
-					</svg>
-				</div>
-				<span>
-					To complete your subscription, click on the confirmation link which will arrive in your inbox
-					in next few minutes
-				</span>
-
-				<button onclick="document.querySelector('.email-success-modal').close();">Dismiss</button>
-			</div>
-
-			<script>
-				document.querySelector('.email-updates-modal').close();
-				document.querySelector('.email-success-modal').showModal();
-			</script>
-		</dialog>
-	`
-
 	hasRecentPendingSub, err := checkHasRecentPendingEmailAlertSubscription(tx, email, time.Now().UTC())
 	if err != nil {
 		log.Printf("postSubscribeEmail.checkHasRecentPendingEmailAlertSubscription: %s", err)
@@ -214,7 +191,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if hasRecentPendingSub {
-		w.Write([]byte(markup))
+		writeTemplate(w, "subscribe_email_pending.html")
 		return
 	}
 
@@ -272,15 +249,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
 	}
 
-	const emailTmpl = `Hi,<br><br>
-	
-To start receiving status alert emails from {{.Name}}, please <a href="{{.Link}}">confirm your subscription</a>.
-<br><br>
-
-If this email reached you by mistake, feel free to ignore it and we won't subscribe you.
-`
-
-	tmpl, err := parseEmailTmpl("alertConfirm", emailTmpl)
+	tmpl, err := parseEmailTmpl("alert_confirm_email.html")
 	if err != nil {
 		log.Printf("postSubscribeEmail.parseEmailTmpls: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -338,7 +307,7 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 		return
 	}
 
-	w.Write([]byte(markup))
+	writeTemplate(w, "subscribe_email_pending.html")
 }
 
 func updatePendingEmailAlertSubscription(tx *sql.Tx, confirmedAt time.Time, token string) error {
@@ -391,22 +360,7 @@ func getPendingEmailAlertSubscriptionEmailByToken(tx *sql.Tx, token string) (str
 }
 
 func getSubscribeEmailConfirm(w http.ResponseWriter, r *http.Request) {
-	const markup = `
-		{{define "title"}}Subscribe{{end}}
-		{{define "body"}}
-			<script>
-				(async () => {
-					const response = await fetch(
-						window.location.href,
-						{method: "POST"}
-					);
-
-					window.location.href = response.url;
-				})();
-			</script>		
-		{{end}}
-	`
-	tmpl, err := parseTmpl("getSubscribeEmailConfirm", markup)
+	tmpl, err := parseTmpl("get_subscribe_email_confirm.html")
 	if err != nil {
 		log.Printf("getSubscribeEmailConfirm.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -558,18 +512,7 @@ func getUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		{{define "title"}}Unsubscribe{{end}}
-		{{define "body"}}
-			<form id="content" class="unsubscribe" hx-post hx-swap="none">
-				<p>Please confirm you want to unsubscribe from alerts</p>
-				<input name="token" type="hidden" value="{{.Token}}">
-				<button>Unsubscribe</button>
-			</form>			
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("unsubscribe", markup)
+	tmpl, err := parseTmpl("unsubscribe.html")
 	if err != nil {
 		log.Printf("getUnsubscribeEmail.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -628,18 +571,7 @@ func postUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		{{define "title"}}You've been unsubscribed{{end}}
-		{{define "body"}}
-			<form id="content" class="unsubscribe" hx-post="/resubscribe" hx-swap="none" hx-swap-oob="true">
-				<p>You've been unsubscribed</p>
-				<input name="token" type="hidden" value="{{.Token}}">
-				<button>Resubscribe</button>
-			</form>			
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("postUnsubscribe", markup)
+	tmpl, err := parseTmpl("post_unsubscribe.html")
 	if err != nil {
 		log.Printf("postUnsubscribe.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -694,16 +626,7 @@ func postResubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		{{define "title"}}You've been re-subscribed{{end}}
-		{{define "body"}}
-			<div id="content" class="unsubscribe" hx-swap-oob="true">
-				<p>You've been re-subscribed</p>
-			</div>			
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("postResubscribe", markup)
+	tmpl, err := parseTmpl("post_resubscribe.html")
 	if err != nil {
 		log.Printf("postResubscribe.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

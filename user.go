@@ -41,51 +41,7 @@ func getEditUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const markup = `
-		{{define "title"}}Edit user{{end}}
-		{{define "body"}}
-			<div class="create-service-container">
-				<div class="admin-nav-header">
-					<div>
-						<a href="/admin/settings" hx-boost="true">
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-								<path fill-rule="evenodd" d="M11.78 5.22a.75.75 0 0 1 0 1.06L8.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd" />
-							</svg>
-						 </a>
-				  
-						<h2>Edit user</h2>
-					</div>
-				</div>
-
-				<form onsubmit="clearAlerts(this);" hx-post hx-swap="none" autocomplete="off">
-					<div id="username-alert"></div>
-					<label>
-						Username
-						<input name="username" value="{{.Username}}" required>
-					</label>
-
-					<div id="password-alert"></div>
-					<label>
-						Password
-						<input name="password" type="password" value="retain" required>
-					</label>
-
-					<div>
-						<button type="submit">Edit</button>
-					</div>
-				</form>
-				<script>
-					function clearAlerts(e) {
-						[...e.querySelectorAll(".alert")].forEach(v => {
-							v.style.display = "none";
-						});
-					}
-				</script>
-			</div>
-		{{end}}
-	`
-
-	tmpl, err := parseTmpl("getEditUser", markup)
+	tmpl, err := parseTmpl("get_edit_user.html")
 	if err != nil {
 		log.Printf("getEditUser.parseTmpl: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

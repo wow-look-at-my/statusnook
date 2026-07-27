@@ -1,0 +1,470 @@
+
+		{{define "title"}}Settings{{end}}
+		{{define "body"}}
+			<div class="admin-nav-header">
+				<div>
+					<h2>Settings</h2>
+				</div>
+			</div>
+
+			<div class="settings-container">
+				<form hx-post="" autocomplete="off" hx-swap="none">
+					<div>
+						<label for="name">
+							Name
+						</label>
+
+						<div class="edit-row">
+							<input id="name" name="name" value="{{.Ctx.Name}}" disabled>
+
+							{{if and (not .Ctx.ConfigFile) (not .EnvName)}}
+								<button 
+									type="button"
+									class="edit-button"
+									onclick="document.querySelector('#name').disabled = false;"
+								>
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4">
+										<path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.75 6.774a2.75 2.75 0 0 0-.596.892l-.848 2.047a.75.75 0 0 0 .98.98l2.047-.848a2.75 2.75 0 0 0 .892-.596l4.261-4.262a1.75 1.75 0 0 0 0-2.474Z" />
+										<path d="M4.75 3.5c-.69 0-1.25.56-1.25 1.25v6.5c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25V9A.75.75 0 0 1 14 9v2.25A2.75 2.75 0 0 1 11.25 14h-6.5A2.75 2.75 0 0 1 2 11.25v-6.5A2.75 2.75 0 0 1 4.75 2H7a.75.75 0 0 1 0 1.5H4.75Z" />
+									</svg>
+								</button>
+							{{end}}
+
+							<button class="confirm-button">
+								Confirm
+							</button>
+
+							<button
+								type="button"
+								class="cancel-button"
+								onclick="document.querySelector('#name').disabled = true;"
+							>
+								Cancel
+							</button>
+						</div>
+					</div>
+				</form>
+
+				<form hx-post="" autocomplete="off" hx-swap="none">
+					<label for="domain">
+						Domain
+					</label>
+
+					{{if .Ctx.UnconfirmedDomainProblem}}
+						<div id="banner" class="banner">
+							<span>{{.Ctx.UnconfirmedDomainProblem}}</span>
+						</div>
+					{{else}}
+						<div id="banner" class="banner"></div>
+					{{end}}
+
+					{{if .Ctx.UnconfirmedDomain}}				
+						{{if not .Ctx.UnconfirmedDomainProblem}}
+							<div class="banner banner--info">
+								<span>
+									Checking for an A record on "{{.Ctx.UnconfirmedDomain}}" every minute
+								</span>
+								<a hx-post="/admin/settings/cancel-domain">Cancel</a>
+							</div>
+						{{end}}
+					{{end}}
+
+					{{if and .Ctx.UnconfirmedDomain .Ctx.UnconfirmedDomainProblem}}
+						<div class="domain-row">
+							<input 
+								id="domain"
+								name="domain"
+								value="{{.Ctx.UnconfirmedDomain}}"
+							>
+
+							<button class="confirm-button">
+								Confirm
+							</button>
+						</div>
+					{{end}}
+
+					{{if and .Domain (not .Ctx.UnconfirmedDomain)}}
+						<div class="edit-row">
+							<input id="domain" name="domain" value="{{.Ctx.Domain}}" disabled>
+
+							<button 
+								type="button"
+								class="edit-button"
+								onclick="document.querySelector('#domain').disabled = false;"
+							>
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4">
+									<path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.75 6.774a2.75 2.75 0 0 0-.596.892l-.848 2.047a.75.75 0 0 0 .98.98l2.047-.848a2.75 2.75 0 0 0 .892-.596l4.261-4.262a1.75 1.75 0 0 0 0-2.474Z" />
+									<path d="M4.75 3.5c-.69 0-1.25.56-1.25 1.25v6.5c0 .69.56 1.25 1.25 1.25h6.5c.69 0 1.25-.56 1.25-1.25V9A.75.75 0 0 1 14 9v2.25A2.75 2.75 0 0 1 11.25 14h-6.5A2.75 2.75 0 0 1 2 11.25v-6.5A2.75 2.75 0 0 1 4.75 2H7a.75.75 0 0 1 0 1.5H4.75Z" />
+								</svg>
+							</button>
+
+							<button class="confirm-button">
+								Confirm
+							</button>
+
+							<button
+								type="button"
+								class="cancel-button"
+								onclick="document.querySelector('#domain').disabled = true;"
+							>
+								Cancel
+							</button>
+						</div>
+					{{end}}
+				</form>
+
+				<div class="settings-users-header">
+					<h3>Users</h3>
+				</div>
+				<div
+					id="users-container" 
+					class="users-container"
+					{{if .Refresh}}hx-swap-oob="true"{{end}}
+				>
+					{{range $user := .Users}}
+						<div>
+							<div>
+								<span>{{$user.Username}}</span>
+							</div>
+							<div class="menu">
+								<button class="menu-button">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+										<path d="M3 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM8.5 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM15.5 8.5a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" />
+									</svg>
+								</button>
+
+								<dialog>
+									<a href="/admin/settings/users/{{$user.ID}}/edit" hx-boost="true">Edit</a>
+									{{if ne $.Ctx.Auth.ID $user.ID }}
+										<button onclick="document.getElementById('dialog-{{$user.ID}}').showModal();">Delete</button>
+									{{end}}
+								</dialog>
+							</div>
+							<dialog class="modal" id="dialog-{{$user.ID}}">
+								<span>Delete {{$user.Username}}</span>
+								<form 
+									hx-delete="/admin/settings/users/{{$user.ID}}"
+									hx-swap="none"
+									hx-on::after-request="htmx.ajax('GET', '?refresh=true', {swap: 'none'});"
+								>
+									<div>
+										<button onclick="document.getElementById('dialog-{{$user.ID}}').close(); return false;">Cancel</button>
+										<button><span></span>Delete</button>
+									</div>
+								</form>
+							</dialog>
+						</div>
+					{{end}}
+
+					{{if .Refresh}}
+						<script>
+							[...document.querySelectorAll("#users-container .menu-button")].forEach(function(e) {
+								e.addEventListener("click", function() {
+									const options = e.closest(".menu").querySelector("dialog");
+									if (!options.open) {
+										[...document.querySelectorAll("dialog:not(.modal)")].forEach(e => {e.close();});
+										options.show();
+										document.addEventListener("click", onClick);
+									} else {
+										options.close();
+									}
+								});
+							});
+						</script>
+					{{end}}
+				</div>
+
+				<div class="settings-users-header">
+					<h3>Invitations</h3>
+
+					<a
+						hx-post="/admin/settings/users/invite"
+						hx-swap="none"
+						hx-on::after-request="htmx.ajax('GET', '?refresh=true', {swap: 'none'});"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+							<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+						</svg>
+					</a>
+				</div>
+				<div 
+					id="invites-container"
+					class="users-container"
+					{{if .Refresh}}hx-swap-oob="true"{{end}}
+				>
+					{{if len .Invitations}}
+						{{range $invite := .Invitations}}
+							<div>
+								<div>
+									<span>https://{{$.Ctx.Domain}}/invitation/{{$invite.Token}}</span>
+									<span>Expires in {{$invite.ExpiresIn}}</span>
+								</div>
+								<div class="menu">
+									<button class="menu-button">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+											<path d="M3 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM8.5 10a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM15.5 8.5a1.5 1.5 0 100 3 1.5 1.5 0 000-3z" />
+										</svg>
+									</button>
+
+									<dialog>
+										<button 
+											href="/admin/settings/users/{{$invite.ID}}/edit"
+											onclick="navigator.clipboard.writeText('https://{{$.Ctx.Domain}}/invitation/{{$invite.Token}}');"
+										>
+											Copy
+										</button>
+										<button onclick="document.getElementById('invitation-dialog-{{$invite.ID}}').showModal();">Delete</button>
+									</dialog>
+								</div>
+								<dialog class="modal" id="invitation-dialog-{{$invite.ID}}">
+									<span>Delete invite</span>
+									<form 
+										hx-delete="/admin/settings/users/invite/{{$invite.ID}}"
+										hx-swap="none"
+										hx-on::after-request="htmx.ajax('GET', '?refresh=true', {swap: 'none'});"
+									>
+										<div>
+											<button onclick="document.getElementById('invitation-dialog-{{$invite.ID}}').close(); return false;">Cancel</button>
+											<button><span></span>Delete</button>
+										</div>
+									</form>
+								</dialog>
+							</div>
+						{{end}}
+					{{else}}
+						<div class="entity-empty-state">
+							<div class="icon">
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4">
+									<path d="M8 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3.156 11.763c.16-.629.44-1.21.813-1.72a2.5 2.5 0 0 0-2.725 1.377c-.136.287.102.58.418.58h1.449c.01-.077.025-.156.045-.237ZM12.847 11.763c.02.08.036.16.046.237h1.446c.316 0 .554-.293.417-.579a2.5 2.5 0 0 0-2.722-1.378c.374.51.653 1.09.813 1.72ZM14 7.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0ZM3.5 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM5 13c-.552 0-1.013-.455-.876-.99a4.002 4.002 0 0 1 7.753 0c.136.535-.324.99-.877.99H5Z" />
+								</svg>
+							</div>
+							<span>Invite another admin</span>
+							<a 
+								class="action"
+								hx-post="/admin/settings/users/invite"
+								hx-swap="none"
+								hx-on::after-request="htmx.ajax('GET', '?refresh=true', {swap: 'none'});"
+							>
+								Create invite
+							</a>
+						</div>
+					{{end}}
+					{{if .Refresh}}
+						<script>
+							[...document.querySelectorAll("#invites-container .menu-button")].forEach(function(e) {
+								e.addEventListener("click", function() {
+									const options = e.closest(".menu").querySelector("dialog");
+									if (!options.open) {
+										[...document.querySelectorAll("dialog:not(.modal)")].forEach(e => {e.close();});
+										options.show();
+										document.addEventListener("click", onClick);
+									} else {
+										options.close();
+									}
+								});
+							});
+						</script>
+					{{end}}
+				</div>
+
+				<div class="settings-users-header">
+					<h3>Configuration</h3>
+					<div>
+						{{if and .GitHubManagedConfig .GitHubConfigSHA}}
+							<div class="settings-users-header__git">
+								{{if .GitHubConfigErrors}}
+									<svg style="color: #F35846;" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+										<path fill-rule="evenodd" d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm2.78-4.22a.75.75 0 0 1-1.06 0L8 9.06l-1.72 1.72a.75.75 0 1 1-1.06-1.06L6.94 8 5.22 6.28a.75.75 0 0 1 1.06-1.06L8 6.94l1.72-1.72a.75.75 0 1 1 1.06 1.06L9.06 8l1.72 1.72a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd" />
+									</svg>
+								{{else}}
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+										<path fill-rule="evenodd" d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm3.844-8.791a.75.75 0 0 0-1.188-.918l-3.7 4.79-1.649-1.833a.75.75 0 1 0-1.114 1.004l2.25 2.5a.75.75 0 0 0 1.15-.043l4.25-5.5Z" clip-rule="evenodd" />
+									</svg>
+								{{end}}
+								<a href="{{.GitHubCommitLink}}" target="_blank">{{.GitHubConfigSHA}}</a>
+							</div>
+						{{end}}
+						<div class="menu">
+							<button type="button" class="menu-button">
+								<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none">
+									<path d="M5.99961 1.80005C6.2383 1.80005 6.46722 1.89487 6.63601 2.06365C6.80479 2.23244 6.89961 2.46135 6.89961 2.70005C6.89961 2.93874 6.80479 3.16766 6.63601 3.33645C6.46722 3.50523 6.2383 3.60005 5.99961 3.60005C5.76091 3.60005 5.532 3.50523 5.36321 3.33645C5.19443 3.16766 5.09961 2.93874 5.09961 2.70005C5.09961 2.46135 5.19443 2.23244 5.36321 2.06365C5.532 1.89487 5.76091 1.80005 5.99961 1.80005ZM5.99961 5.10005C6.2383 5.10005 6.46722 5.19487 6.63601 5.36365C6.80479 5.53244 6.89961 5.76135 6.89961 6.00005C6.89961 6.23874 6.80479 6.46766 6.63601 6.63645C6.46722 6.80523 6.2383 6.90005 5.99961 6.90005C5.76091 6.90005 5.532 6.80523 5.36321 6.63645C5.19443 6.46766 5.09961 6.23874 5.09961 6.00005C5.09961 5.76135 5.19443 5.53244 5.36321 5.36365C5.532 5.19487 5.76091 5.10005 5.99961 5.10005ZM6.89961 9.30005C6.89961 9.06135 6.80479 8.83244 6.63601 8.66365C6.46722 8.49487 6.2383 8.40005 5.99961 8.40005C5.76091 8.40005 5.532 8.49487 5.36321 8.66365C5.19443 8.83244 5.09961 9.06135 5.09961 9.30005C5.09961 9.53874 5.19443 9.76766 5.36321 9.93645C5.532 10.1052 5.76091 10.2 5.99961 10.2C6.2383 10.2 6.46722 10.1052 6.63601 9.93645C6.80479 9.76766 6.89961 9.53874 6.89961 9.30005Z" fill="#595959"/>
+								</svg>
+							</button>
+
+							<dialog>
+								<a href="/admin/settings/config-settings" hx-boost="true">Settings</a>
+								{{if .ConfigFile}}
+									<button onclick="document.getElementById('secrets-dialog').showModal();">Secrets</button>
+								{{end}}
+							</dialog>
+						</div>
+					</div>
+				</div>
+				{{if .ConfigFileEnabled}}
+					<form id="config-form" hx-post="/admin/settings/config" hx-swap="none">		
+						<div id="editor-container" style="width: 100%; height: 800px; margin-top: 1.0rem; position: relative;">
+							<div id="save-overlay" class="save-overlay">
+								<span>Save changes</span>
+								<button>
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+										<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
+									</svg>
+								</button>
+							</div>
+							<div id="save-overlay-errors" class="save-overlay-errors">
+								{{range $error := .GitHubConfigErrors}}
+									<div class="save-overlay save-overlay--error">
+										{{$error}}
+									</div>
+								{{end}}
+							</div>
+						</div>
+						<input name="config" type="hidden" value="{{.ConfigFile}}" required>
+					</form>
+				{{else}}
+					<div class="entity-empty-state">
+						<div class="icon">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+								<path fill-rule="evenodd" d="M4.5 1.938a.75.75 0 0 1 1.025.274l.652 1.131c.351-.138.71-.233 1.073-.288V1.75a.75.75 0 0 1 1.5 0v1.306a5.03 5.03 0 0 1 1.072.288l.654-1.132a.75.75 0 1 1 1.298.75l-.652 1.13c.286.23.55.492.785.786l1.13-.653a.75.75 0 1 1 .75 1.3l-1.13.652c.137.351.233.71.288 1.073h1.305a.75.75 0 0 1 0 1.5h-1.306a5.032 5.032 0 0 1-.288 1.072l1.132.654a.75.75 0 0 1-.75 1.298l-1.13-.652c-.23.286-.492.55-.786.785l.652 1.13a.75.75 0 0 1-1.298.75l-.653-1.13c-.351.137-.71.233-1.073.288v1.305a.75.75 0 0 1-1.5 0v-1.306a5.032 5.032 0 0 1-1.072-.288l-.653 1.132a.75.75 0 0 1-1.3-.75l.653-1.13a4.966 4.966 0 0 1-.785-.786l-1.13.652a.75.75 0 0 1-.75-1.298l1.13-.653a4.965 4.965 0 0 1-.288-1.073H1.75a.75.75 0 0 1 0-1.5h1.306a5.03 5.03 0 0 1 .288-1.072l-1.132-.653a.75.75 0 0 1 .75-1.3l1.13.653c.23-.286.492-.55.786-.785l-.653-1.13A.75.75 0 0 1 4.5 1.937Zm1.14 3.476a3.501 3.501 0 0 0 0 5.172L7.135 8 5.641 5.414ZM8.434 8.75 6.94 11.336a3.491 3.491 0 0 0 2.81-.305 3.49 3.49 0 0 0 1.669-2.281H8.433Zm2.987-1.5H8.433L6.94 4.664a3.501 3.501 0 0 1 4.48 2.586Z" clip-rule="evenodd" />
+							</svg>
+						</div>
+						<span>Your configuration is managed by Statusnook web UI forms</span>
+						<a class="action" href="/admin/settings/config-settings" hx-boost="true">Switch to text based</a>
+					</div>
+				{{end}}
+
+				<dialog class="modal secrets-modal" id="secrets-dialog" onclose="onCloseDialog(this);">
+					<div>
+						<span>Secrets</span>
+						<button onclick="document.getElementById('secrets-dialog').close();">
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+								<path d="M5.28 4.22a.75.75 0 0 0-1.06 1.06L6.94 8l-2.72 2.72a.75.75 0 1 0 1.06 1.06L8 9.06l2.72 2.72a.75.75 0 1 0 1.06-1.06L9.06 8l2.72-2.72a.75.75 0 0 0-1.06-1.06L8 6.94 5.28 4.22Z" />
+							</svg>
+						</button>
+					</div>
+					<form 
+						hx-post="/admin/settings/secrets"
+						hx-swap="none"
+						autocomplete="off"
+					>
+						<div class="secrets-modal__input">
+							<input name="input" placeholder="Input" required>
+							<div>
+								<input id="output" placeholder="Output" disabled>
+								<button type="button" onclick="copyOutput(this);">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+										<path d="M5.5 3.5A1.5 1.5 0 0 1 7 2h2.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 1 .439 1.061V9.5A1.5 1.5 0 0 1 12 11V8.621a3 3 0 0 0-.879-2.121L9 4.379A3 3 0 0 0 6.879 3.5H5.5Z" />
+										<path d="M4 5a1.5 1.5 0 0 0-1.5 1.5v6A1.5 1.5 0 0 0 4 14h5a1.5 1.5 0 0 0 1.5-1.5V8.621a1.5 1.5 0 0 0-.44-1.06L7.94 5.439A1.5 1.5 0 0 0 6.878 5H4Z" />
+									</svg>
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+										<path fill-rule="evenodd" d="M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z" clip-rule="evenodd" />
+									</svg>
+								</button>
+							</div>
+						</div>
+
+						<div>
+							<button name="action" value="encrypt">Encrypt</button>
+							<button name="action" value="decrypt">Decrypt</button>
+						</div>
+					</form>
+				</dialog>	
+
+				{{if .ConfigFileEnabled}}
+					<link
+						rel="stylesheet"
+						data-name="vs/editor/editor.main"
+						href="/static/monaco-editor/min/vs/editor/editor.main.css"
+					/>
+
+					<script>
+						var require = { paths: { vs: '/static/monaco-editor/min/vs' } };
+					</script>
+				{{end}}
+
+
+				<script>
+					function copyOutput(e) {
+						if (e.form.elements.output.value === "") {
+							return;
+						}
+
+						navigator.clipboard.writeText(e.form.elements.output.value);
+						e.classList.add("copy-success");
+		
+						setTimeout(() => {
+							e.classList.remove("copy-success");
+						}, 1000);
+					}
+
+					function onCloseDialog(e) {
+						[...e.querySelectorAll("form input")].forEach((v) => {
+							v.value = "";
+						});
+					}
+
+					{{if .ConfigFileEnabled}}
+						(async () => {
+							function addScript(url) {
+								return new Promise((resolve, reject) => {
+									const script = document.createElement('script');
+									script.onload = () => {
+										resolve();
+									};
+									script.onerror = reject;
+									script.src = url;
+									document.body.appendChild(script);
+								});
+							}
+
+							if (window.monaco) {
+								window.monaco.editor.getModels().forEach(model => model.dispose());
+								initEditor();
+							}
+
+							function initEditor() {
+								configFile = "{{.ConfigFile}}";
+
+								const editor = monaco.editor.create(document.getElementById("editor-container"), {
+									language: 'yaml',
+									fontSize: 16,
+									theme: "vs-dark",
+									minimap: {enabled: false},
+									overviewRulerLanes: 0,
+									padding: {top: 24},
+									automaticLayout: true,
+									value: configFile,
+									{{if .GitHubManagedConfig}}readOnly: true,{{end}}
+								});	
+																	
+								editor.getModel().onDidChangeContent((event) => {
+									const configForm = document.querySelector("#config-form");
+									
+									const value = editor.getModel().getValue();
+
+									configForm.elements["config"].value = value;
+
+									const saveOverlay = configForm.querySelector("#save-overlay");
+									
+									if (value === configFile) {
+										saveOverlay.style.display = "none";
+									} else {
+										saveOverlay.style.display = "flex";
+									}
+								});
+							}
+
+							if (!window.monaco) {
+								await addScript("/static/monaco-editor/min/vs/loader.js");
+								await addScript("/static/monaco-editor/min/vs/editor/editor.main.nls.js");
+								await addScript("/static/monaco-editor/min/vs/editor/editor.main.js");
+								initEditor();
+							}
+						})();
+					{{end}}
+				</script>
+
+				<div id="update-config"></div>
+			</div>
+		{{end}}
+	
