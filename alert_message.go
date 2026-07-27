@@ -96,6 +96,12 @@ func postAddAlertMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := r.PostFormValue("message")
+	if message == "" {
+		// Creating and editing an alert both reject an empty message; adding
+		// one used to store a blank update on the status page.
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	tx, err := rwDB.Begin()
 	if err != nil {

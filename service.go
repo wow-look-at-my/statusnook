@@ -99,6 +99,13 @@ func services(w http.ResponseWriter, r *http.Request) {
 }
 
 func getCreateService(w http.ResponseWriter, r *http.Request) {
+	// The config file owns these resources when text-based config is on, so the
+	// form that would create one out of band stays closed, like the edit form.
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	tmpl, err := parseTmpl("get_create_service.html")
 	if err != nil {
 		log.Printf("getCreateService.parseTmpl: %s", err)

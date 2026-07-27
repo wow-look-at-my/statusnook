@@ -11,6 +11,9 @@ with htmx. No frontend build step.
 - Files are capped at 750 lines.
 - Run it locally: `go-toolchain --cgo` then `./statusnook -port 8000`
   (dev builds listen on 8000 and set `metaSSL=false`).
+- Tests use the real routing table via `newRouter()` and a temporary database
+  (`useTestDBs`, `newTestServer`). Coverage is enforced at 80% by the toolchain
+  and currently sits well below that; every new test helps.
 
 ## Templates
 

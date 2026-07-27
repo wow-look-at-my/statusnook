@@ -6,6 +6,13 @@ import (
 )
 
 func getCreateMonitor(w http.ResponseWriter, r *http.Request) {
+	// The config file owns these resources when text-based config is on, so the
+	// form that would create one out of band stays closed, like the edit form.
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	refreshID := r.URL.Query().Get("refresh")
 
 	tx, err := db.Begin()
