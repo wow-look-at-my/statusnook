@@ -10,6 +10,9 @@ permissions:
   checks: read
 
 jobs:
+  # The org's required "all-builds" status is posted by the
+  # required-builds-manager app, which aggregates this repo's builds. Do not add
+  # a job named all-builds: the toolchain rejects it as shadowing that gate.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -18,23 +21,3 @@ jobs:
         with:
           # github.com/mattn/go-sqlite3 does not compile without cgo.
           cgo: true
-
-  # The branch ruleset requires an "all-builds" status check, and the
-  # go-toolchain action refuses to run in a job of that name, so aggregate.
-  all-builds:
-    runs-on: ubuntu-latest
-    if: always()
-    needs: [test]
-    steps:
-      - uses: wow-look-at-my/actions@typescript#latest
-        with:
-          needs: ${{ toJSON(needs) }}
-          script: |
-            const failed = Object.entries(needs).filter(
-              ([, job]) => job.result !== 'success' && job.result !== 'skipped'
-            );
-            if (failed.length > 0) {
-              core.setFailed(
-                failed.map(([name, job]) => `${name}: ${job.result}`).join(', ')
-              );
-            }
