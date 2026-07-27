@@ -265,11 +265,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 
 	err = sendMail(
 		smtpDetail.Host+":"+strconv.Itoa(smtpDetail.Port),
-		PlainOrLoginAuth(
-			smtpDetail.Username,
-			smtpDetail.Password,
-			smtpDetail.Host,
-		),
+		smtpAuthFor(smtpDetail),
 		smtpDetail.From,
 		[]string{email},
 		bytes.Join(msg, []byte("\r\n")),

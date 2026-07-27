@@ -24,6 +24,18 @@ func PlainOrLoginAuth(username string, password string, host string) smtp.Auth {
 	return &plainOrLoginAuth{username: username, password: password, host: host}
 }
 
+// smtpAuthFor returns nil when the channel carries no credentials. Passing an
+// authenticator regardless meant an unauthenticated relay - a mail container on
+// the same host, or a provider that relays by IP - was rejected with "server
+// does not support AUTH".
+func smtpAuthFor(detail SMTPNotificationDetails) smtp.Auth {
+	if detail.Username == "" && detail.Password == "" {
+		return nil
+	}
+
+	return PlainOrLoginAuth(detail.Username, detail.Password, detail.Host)
+}
+
 func (a *plainOrLoginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
 	if !server.TLS {
 		return "", nil, fmt.Errorf("plainAuth.Start: unencrypted connection")
@@ -77,11 +89,7 @@ func sendMonitorAlertEmail(
 		)
 	}
 
-	smtpAuth := PlainOrLoginAuth(
-		smtpDetail.Username,
-		smtpDetail.Password,
-		smtpDetail.Host,
-	)
+	smtpAuth := smtpAuthFor(smtpDetail)
 
 	const downSubject = "🚨 Issue detected on monitor"
 	const upSubject = "✅ Issue resolved on monitor"

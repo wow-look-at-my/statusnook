@@ -12,11 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeSMTP is the smallest server that can accept one message.
+// fakeSMTP is a minimal server that accepts messages for the tests. It keeps
+// serving connections until the test ends, because several paths send more than
+// one message.
 type fakeSMTP struct {
 	mu       sync.Mutex
 	conv     []string
 	body     string
+	bodies   []string
 	listener net.Listener
 }
 
@@ -30,65 +33,79 @@ func startFakeSMTP(t *testing.T) *fakeSMTP {
 	t.Cleanup(func() { listener.Close() })
 
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-		write := func(line string) {
-			conn.Write([]byte(line + "\r\n"))
-		}
-
-		write("220 fake ESMTP")
-
-		inData := false
-		var body strings.Builder
-
 		for {
-			line, err := reader.ReadString('\n')
+			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			line = strings.TrimRight(line, "\r\n")
 
-			if inData {
-				if line == "." {
-					inData = false
-					server.mu.Lock()
-					server.body = body.String()
-					server.mu.Unlock()
-					write("250 queued")
-					continue
-				}
-				body.WriteString(line + "\n")
-				continue
-			}
-
-			server.mu.Lock()
-			server.conv = append(server.conv, line)
-			server.mu.Unlock()
-
-			switch {
-			case strings.HasPrefix(line, "EHLO"), strings.HasPrefix(line, "HELO"):
-				write("250-fake")
-				write("250 SIZE 1000000")
-			case strings.HasPrefix(line, "MAIL FROM"), strings.HasPrefix(line, "RCPT TO"):
-				write("250 ok")
-			case line == "DATA":
-				inData = true
-				write("354 send it")
-			case line == "QUIT":
-				write("221 bye")
-				return
-			default:
-				write("500 unknown")
-			}
+			go server.serve(conn)
 		}
 	}()
 
 	return server
+}
+
+// serve handles one SMTP conversation.
+func (f *fakeSMTP) serve(conn net.Conn) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	write := func(line string) {
+		conn.Write([]byte(line + "\r\n"))
+	}
+
+	write("220 fake ESMTP")
+
+	inData := false
+	var body strings.Builder
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+
+		if inData {
+			if line == "." {
+				inData = false
+
+				f.mu.Lock()
+				f.body = body.String()
+				f.bodies = append(f.bodies, f.body)
+				f.mu.Unlock()
+
+				body.Reset()
+				write("250 queued")
+				continue
+			}
+			body.WriteString(line + "\n")
+			continue
+		}
+
+		f.mu.Lock()
+		f.conv = append(f.conv, line)
+		f.mu.Unlock()
+
+		switch {
+		case strings.HasPrefix(line, "EHLO"), strings.HasPrefix(line, "HELO"):
+			write("250-fake")
+			write("250 SIZE 1000000")
+		case strings.HasPrefix(line, "MAIL FROM"), strings.HasPrefix(line, "RCPT TO"):
+			write("250 ok")
+		case line == "DATA":
+			inData = true
+			write("354 send it")
+		case line == "RSET":
+			write("250 ok")
+		case line == "QUIT":
+			write("221 bye")
+			return
+		default:
+			write("500 unknown")
+		}
+	}
 }
 
 func (f *fakeSMTP) addr() string {

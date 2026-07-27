@@ -290,11 +290,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 							err = sendMail(
 								smtpDetail.Host+":"+strconv.Itoa(smtpDetail.Port),
-								PlainOrLoginAuth(
-									smtpDetail.Username,
-									smtpDetail.Password,
-									smtpDetail.Host,
-								),
+								smtpAuthFor(smtpDetail),
 								smtpDetail.From,
 								[]string{notification.Destination},
 								bytes.Join(msg, []byte("\r\n")),

@@ -157,7 +157,7 @@ func slackOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	// response would hold this handler open indefinitely.
 	slackClient := http.Client{Timeout: 30 * time.Second}
 
-	resp, err := slackClient.PostForm("https://slack.com/api/oauth.v2.access", form)
+	resp, err := slackClient.PostForm(slackTokenURL, form)
 	if err != nil {
 		log.Printf("slackOAuth2Callback.PostForm: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -242,7 +242,7 @@ func postmarkDeleteSuppression(email string, token string, stream string) error 
 
 	req, err := http.NewRequest(
 		http.MethodPost,
-		"https://api.postmarkapp.com/message-streams/"+stream+"/suppressions/delete",
+		postmarkAPIURL+"/message-streams/"+stream+"/suppressions/delete",
 		strings.NewReader(body),
 	)
 	if err != nil {
@@ -322,7 +322,7 @@ func postmarkDumpSupressions(token string, stream string) (SupressionDumpRespons
 
 	req, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.postmarkapp.com/message-streams/"+stream+"/suppressions/dump"+
+		postmarkAPIURL+"/message-streams/"+stream+"/suppressions/dump"+
 			"?SupressionReason=ManualSuppression",
 		nil,
 	)
