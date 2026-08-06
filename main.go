@@ -236,6 +236,10 @@ func initDB(immediate bool) *sql.DB {
 				existingMigrations[name] = true
 			}
 
+				if err := rows.Err(); err != nil {
+					log.Fatalf("initDB.RowsErrMigration: %s", err)
+				}
+
 			for _, file := range files {
 				migrationName := strings.TrimRight(file.Name(), ".sql")
 				if _, ok := existingMigrations[migrationName]; ok {
@@ -341,6 +345,10 @@ func copyTable(tx *sql.Tx, src string, dst string) error {
 		cols = append(cols, col)
 	}
 
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("copyTable.RowsErr: %w", err)
+	}
+
 	query := fmt.Sprintf(`
 		insert into
 			%s (
@@ -383,6 +391,10 @@ func copyNonSlugToSlugTable(tx *sql.Tx, src string, dst string) error {
 		}
 
 		srcCols = append(srcCols, col)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("copyNonSlugToSlugTable.RowsErr: %w", err)
 	}
 
 	dstCols := append(append([]string{}, "id", "slug"), srcCols[1:]...)
@@ -462,6 +474,10 @@ func generateSlugBackfillCte(tx *sql.Tx, tableName string) (string, []any, error
 
 		idToName[id] = name
 		sortedIds = append(sortedIds, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return "", []any{}, fmt.Errorf("generateSlugBackfillCte.RowsErr: %w", err)
 	}
 
 	if len(idToName) == 0 {
@@ -1140,6 +1156,10 @@ func listAllMonitorLogLastChecked(tx *sql.Tx) ([]monitorLogLastChecked, error) {
 		allLastChecked = append(allLastChecked, lastChecked)
 	}
 
+	if err := rows.Err(); err != nil {
+		return allLastChecked, fmt.Errorf("listAllMonitorLogLastChecked.RowsErr: %w", err)
+	}
+
 	return allLastChecked, nil
 }
 
@@ -1222,10 +1242,10 @@ func sendMonitorAlertEmail(
 	}
 
 	msg := [][]byte{
-		[]byte("Subject: " + subject + " \"" +
-			monitor.Name + "\""),
-		[]byte("To: " + strings.Join(emailAddresses, ", ")),
-		[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+		[]byte("Subject: " + headerValue(subject) + " \"" +
+			headerValue(monitor.Name) + "\""),
+		[]byte("To: " + headerValue(strings.Join(emailAddresses, ", "))),
+		[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -1233,7 +1253,7 @@ func sendMonitorAlertEmail(
 			k == "X-PM-Message-Stream" {
 			continue
 		}
-		msg = append(msg, []byte(k+": "+v))
+		msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 	}
 	if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
@@ -1780,6 +1800,10 @@ func listUnsentAlertNotifications(tx *sql.Tx) ([]UnsentAlertNotification, error)
 		notifications = append(notifications, notification)
 	}
 
+	if err := rows.Err(); err != nil {
+		return notifications, fmt.Errorf("listUnsentAlertNotifications.RowsErr: %w", err)
+	}
+
 	return notifications, nil
 }
 
@@ -1997,10 +2021,10 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 							}
 
 							msg := [][]byte{
-								[]byte("Subject: " + metaName + " " + notification.AlertType +
-									" alert: update regarding \"" + notification.AlertTitle + "\""),
-								[]byte("To: " + notification.Destination),
-								[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+								[]byte("Subject: " + headerValue(metaName) + " " + notification.AlertType +
+									" alert: update regarding \"" + headerValue(notification.AlertTitle) + "\""),
+								[]byte("To: " + headerValue(notification.Destination)),
+								[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
 								[]byte("Content-Type: text/html; charset=UTF-8"),
 							}
 							for k, v := range smtpDetail.Headers {
@@ -2008,7 +2032,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									k == "X-PM-Message-Stream" {
 									continue
 								}
-								msg = append(msg, []byte(k+": "+v))
+								msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 							}
 							if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 								msg = append(
@@ -4244,6 +4268,10 @@ func listActiveAlertEmailSubscriptions(tx *sql.Tx) ([]AlertSubscription, error) 
 		subs = append(subs, sub)
 	}
 
+	if err := rows.Err(); err != nil {
+		return subs, fmt.Errorf("listActiveAlertEmailSubscriptions.RowsErr: %w", err)
+	}
+
 	return subs, nil
 }
 
@@ -4798,9 +4826,9 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := [][]byte{
-		[]byte("Subject: Confirm your subscription to " + metaName + " status alerts"),
-		[]byte("To: " + email),
-		[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+		[]byte("Subject: Confirm your subscription to " + headerValue(metaName) + " status alerts"),
+		[]byte("To: " + headerValue(email)),
+		[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -4808,7 +4836,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 			k == "X-PM-Message-Stream" {
 			continue
 		}
-		msg = append(msg, []byte(k+": "+v))
+		msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 	}
 	if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
@@ -5535,6 +5563,10 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 		alerts = append(alerts, alert)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErr: %w", err)
+	}
+
 	alertIDs := make([]string, 0, len(alerts))
 	for _, alert := range alerts {
 		alertIDs = append(alertIDs, strconv.Itoa(alert.ID))
@@ -5585,6 +5617,10 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 		messages[alertID] = append(messages[alertID], message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErrMessages: %w", err)
+	}
+
 	serviceQuery := fmt.Sprintf(
 		`
 		select
@@ -5628,6 +5664,10 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 			messages[alertID] = []AlertDetailMessage{}
 		}
 		services[alertID] = append(services[alertID], service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErr: %w", err)
 	}
 
 	for i, alert := range alerts {
@@ -6178,6 +6218,10 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		alerts = append(alerts, alert)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErr: %w", err)
+	}
+
 	alertIDs := make([]string, 0, len(alerts))
 	for _, alert := range alerts {
 		alertIDs = append(alertIDs, strconv.Itoa(alert.ID))
@@ -6228,6 +6272,10 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		messages[alertID] = append(messages[alertID], message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErrMessages: %w", err)
+	}
+
 	serviceQuery := fmt.Sprintf(
 		`
 		select
@@ -6271,6 +6319,10 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 			messages[alertID] = []AlertDetailMessage{}
 		}
 		services[alertID] = append(services[alertID], service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErr: %w", err)
 	}
 
 	for i, alert := range alerts {
@@ -6794,6 +6846,10 @@ func listAlerts(tx *sql.Tx) ([]AlertListing, error) {
 		alerts = append(alerts, alert)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("listAlerts.RowsErr: %w", err)
+	}
+
 	return alerts, nil
 }
 
@@ -6993,6 +7049,10 @@ func listMonitors(tx *sql.Tx) ([]Monitor, error) {
 
 		monitor.RequestHeaders = requestHeaders
 		monitorListings = append(monitorListings, monitor)
+	}
+
+	if err := rows.Err(); err != nil {
+		return monitorListings, fmt.Errorf("listMonitors.RowsErr: %w", err)
 	}
 
 	return monitorListings, nil
@@ -7241,6 +7301,10 @@ func listMonitorLogs(tx *sql.Tx, monitorID int, limit int, after int, before int
 			return monitorLogs, fmt.Errorf("listMonitorLogs.Scan: %w", err)
 		}
 		monitorLogs = append(monitorLogs, monitorLog)
+	}
+
+	if err := rows.Err(); err != nil {
+		return monitorLogs, fmt.Errorf("listMonitorLogs.RowsErr: %w", err)
 	}
 
 	return monitorLogs, nil
@@ -8897,8 +8961,14 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 	requestHeaders := sql.NullString{}
 	requestHeadersMap := map[string]string{}
 	if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-		for i := range r.Form["header-key"] {
-			requestHeadersMap[r.Form["header-key"][i]] = r.Form["header-value"][i]
+		// PostForm, not Form: Form merges the query string in, so
+		// ?header-key=x on the URL injected an entry and skewed the two
+		// slices against each other. Bounded by the shorter of the two --
+		// indexing values by the keys' length panicked on any mismatch.
+		keys := r.PostForm["header-key"]
+		values := r.PostForm["header-value"]
+		for i := 0; i < len(keys) && i < len(values); i++ {
+			requestHeadersMap[keys[i]] = values[i]
 		}
 	}
 	requestHeadersSerialized, err := json.Marshal(requestHeadersMap)
@@ -8932,8 +9002,10 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 
 	if r.PostFormValue("form-key") != "" && r.PostFormValue("form-value") != "" {
 		urlValues := url.Values{}
-		for i := 0; i < len(r.Form["form-key"]); i++ {
-			urlValues.Add(r.Form["form-key"][i], r.Form["form-value"][i])
+		formKeys := r.PostForm["form-key"]
+		formValues := r.PostForm["form-value"]
+		for i := 0; i < len(formKeys) && i < len(formValues); i++ {
+			urlValues.Add(formKeys[i], formValues[i])
 		}
 		body = sql.NullString{
 			Valid:  true,
@@ -9889,8 +9961,14 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 	requestHeaders := sql.NullString{}
 	requestHeadersMap := map[string]string{}
 	if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-		for i := range r.Form["header-key"] {
-			requestHeadersMap[r.Form["header-key"][i]] = r.Form["header-value"][i]
+		// PostForm, not Form: Form merges the query string in, so
+		// ?header-key=x on the URL injected an entry and skewed the two
+		// slices against each other. Bounded by the shorter of the two --
+		// indexing values by the keys' length panicked on any mismatch.
+		keys := r.PostForm["header-key"]
+		values := r.PostForm["header-value"]
+		for i := 0; i < len(keys) && i < len(values); i++ {
+			requestHeadersMap[keys[i]] = values[i]
 		}
 	}
 	requestHeadersSerialized, err := json.Marshal(requestHeadersMap)
@@ -9916,8 +9994,10 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 
 	if r.PostFormValue("form-key") != "" && r.PostFormValue("form-value") != "" {
 		urlValues := url.Values{}
-		for i := 0; i < len(r.Form["form-key"]); i++ {
-			urlValues.Add(r.Form["form-key"][i], r.Form["form-value"][i])
+		formKeys := r.PostForm["form-key"]
+		formValues := r.PostForm["form-value"]
+		for i := 0; i < len(formKeys) && i < len(formValues); i++ {
+			urlValues.Add(formKeys[i], formValues[i])
 		}
 		body = sql.NullString{
 			Valid:  true,
@@ -10105,6 +10185,10 @@ func getAlertByID(tx *sql.Tx, id int) (AlertDetail, error) {
 		alert.Messages = append(alert.Messages, message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alert, fmt.Errorf("getAlertByID.RowsErr: %w", err)
+	}
+
 	const serviceQuery = `
 		select
 			service.id,
@@ -10136,6 +10220,10 @@ func getAlertByID(tx *sql.Tx, id int) (AlertDetail, error) {
 		}
 
 		alert.Services = append(alert.Services, service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alert, fmt.Errorf("getAlertByID.RowsErr: %w", err)
 	}
 
 	return alert, nil
@@ -10179,6 +10267,10 @@ func getAlertSettings(tx *sql.Tx) (AlertSettings, error) {
 			}
 			settings.ManagedSubscriptions = parsedV
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return settings, fmt.Errorf("getAlertSettings.RowsErr: %w", err)
 	}
 
 	return settings, nil
@@ -12279,6 +12371,10 @@ func listServices(tx *sql.Tx) ([]service, error) {
 		services = append(services, svc)
 	}
 
+	if err := rows.Err(); err != nil {
+		return services, fmt.Errorf("listServices.RowsErr: %w", err)
+	}
+
 	return services, nil
 }
 
@@ -13419,6 +13515,10 @@ func listNotificationChannels(tx *sql.Tx, options listNotificationsOptions) ([]N
 		channels = append(channels, channel)
 	}
 
+	if err := rows.Err(); err != nil {
+		return channels, fmt.Errorf("listNotificationChannels.RowsErr: %w", err)
+	}
+
 	return channels, nil
 }
 
@@ -13470,6 +13570,10 @@ func listNotificationChannelsByMonitorID(tx *sql.Tx, monitorID int) ([]Notificat
 		}
 
 		notifications = append(notifications, channel)
+	}
+
+	if err := rows.Err(); err != nil {
+		return notifications, fmt.Errorf("listNotificationChannelsByMonitorID.RowsErr: %w", err)
 	}
 
 	return notifications, nil
@@ -13556,8 +13660,10 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 
 		headers := map[string]string{}
 		if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-			for i := 0; i < len(r.Form["header-key"]); i++ {
-				headers[r.Form["header-key"][i]] = r.Form["header-value"][i]
+			keys := r.PostForm["header-key"]
+			values := r.PostForm["header-value"]
+			for i := 0; i < len(keys) && i < len(values); i++ {
+				headers[keys[i]] = values[i]
 			}
 		}
 
@@ -14302,8 +14408,10 @@ func postEditNotification(w http.ResponseWriter, r *http.Request) {
 
 		headers := map[string]string{}
 		if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-			for i := 0; i < len(r.Form["header-key"]); i++ {
-				headers[r.Form["header-key"][i]] = r.Form["header-value"][i]
+			keys := r.PostForm["header-key"]
+			values := r.PostForm["header-value"]
+			for i := 0; i < len(keys) && i < len(values); i++ {
+				headers[keys[i]] = values[i]
 			}
 		}
 
@@ -14861,6 +14969,10 @@ func listMailGroups(tx *sql.Tx) ([]MailGroup, error) {
 		mailGroups = append(mailGroups, mailGroup)
 	}
 
+	if err := rows.Err(); err != nil {
+		return mailGroups, fmt.Errorf("listMailGroups.RowsErr: %w", err)
+	}
+
 	return mailGroups, nil
 }
 
@@ -14930,6 +15042,10 @@ func listMailGroupIDsByMonitorID(tx *sql.Tx, monitorID int) ([]MailGroupIDs, err
 		allIds = append(allIds, ids)
 	}
 
+	if err := rows.Err(); err != nil {
+		return allIds, fmt.Errorf("listMailGroupIDsByMonitorID.RowsErr: %w", err)
+	}
+
 	return allIds, nil
 }
 
@@ -14961,6 +15077,10 @@ func listMailGroupMembersByID(tx *sql.Tx, id int) ([]MailGroupMember, error) {
 		members = append(members, member)
 	}
 
+	if err := rows.Err(); err != nil {
+		return members, fmt.Errorf("listMailGroupMembersByID.RowsErr: %w", err)
+	}
+
 	return members, nil
 }
 
@@ -14988,6 +15108,10 @@ func listMailGroupMembersEmailsByMonitorID(tx *sql.Tx, id int) ([]string, error)
 		}
 
 		emails = append(emails, email)
+	}
+
+	if err := rows.Err(); err != nil {
+		return emails, fmt.Errorf("listMailGroupMembersEmailsByMonitorID.RowsErr: %w", err)
 	}
 
 	return emails, nil
@@ -17110,6 +17234,10 @@ func listActiveUserInvitations(tx *sql.Tx, minTime time.Time) ([]UserInvitation,
 		invs = append(invs, inv)
 	}
 
+	if err := rows.Err(); err != nil {
+		return invs, fmt.Errorf("listActiveUserInvitations.RowsErr: %w", err)
+	}
+
 	return invs, nil
 }
 
@@ -18555,6 +18683,10 @@ func listUsers(tx *sql.Tx) ([]SettingsUser, error) {
 		}
 
 		users = append(users, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		return users, fmt.Errorf("listUsers.RowsErr: %w", err)
 	}
 
 	return users, nil
