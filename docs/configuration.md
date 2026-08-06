@@ -142,3 +142,43 @@ Secrets can be encrypted and decrypted via the settings page.
 
 When Statusnook is applying a configuration it attempts to decrypt and replace any value prefixed with `secret_`.
 
+
+## Validating a config before you push it
+
+The instance applies a config on a GitHub push and reports failures only on
+its own settings page, so a bad push looks like a successful one from GitHub's
+side. Check the file first:
+
+```
+statusnook -validate-config config.yaml
+```
+
+It exits 0 when the config would apply cleanly, or prints the same messages the
+settings page would show and exits 1. Nothing is written: the config is applied
+to a throwaway in-memory database and discarded.
+
+Two things it cannot check offline. `secret_` values are decrypted with a key
+that lives in the instance's database, so they are left as-is -- their shape is
+checked, their contents are not. And a `rename:` source is assumed to exist,
+because whether it does is a fact about the live instance.
+
+## Constraints the config has to satisfy
+
+These are enforced but were not written down anywhere, so the only way to
+discover them was to push a config that broke them:
+
+| Field | Allowed values |
+|---|---|
+| `monitors.<key>.method` | `get`, `post`, `patch`, `put`, `delete` |
+| `monitors.<key>.frequency` | `10`, `30`, `60` (seconds) |
+| `monitors.<key>.timeout` | `5`, `10`, `15` (seconds) |
+| `monitors.<key>.attempts` | `1`, `2`, `3` |
+
+Every key -- `monitors.<key>`, `services.<key>`, `mail-groups.<key>`,
+`notification-channels.<key>` -- must be lower-case letters, digits and
+hyphens, with no leading or trailing hyphen. `general-settings.name` is
+required. Unknown fields are rejected outright rather than ignored, so a
+misspelled `frequncy:` fails the whole file.
+
+A monitor counts as up when the response status is under 400, after redirects,
+so 204, 302 and 206 all pass.
