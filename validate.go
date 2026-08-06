@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 var validateConfigFlag = flag.String(
@@ -87,8 +90,10 @@ func validateConfig(path string) error {
 // Only the slug is load-bearing; the rest of each row is filler that the
 // config's own entry overwrites moments later in the same transaction.
 func seedRenameSources(tx *sql.Tx, cfgBytes []byte) error {
-	cfg, err := decodeConfig(cfgBytes)
-	if err != nil {
+	cfg := StatusnookConfig{}
+	decoder := yaml.NewDecoder(bytes.NewReader(cfgBytes))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		// Not this function's error to report: applyConfig decodes the same
 		// bytes and returns the message the user needs.
 		return nil

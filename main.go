@@ -483,10 +483,14 @@ func generateSlugBackfillCte(tx *sql.Tx, tableName string) (string, []any, error
 	return updateQuery, params, nil
 }
 
+var tmplsMu sync.RWMutex
 var tmpls = map[string]*template.Template{}
 
 func parseTmpl(name string, markup string) (*template.Template, error) {
-	if tmpl, ok := tmpls[name]; ok {
+	tmplsMu.RLock()
+	tmpl, ok := tmpls[name]
+	tmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
@@ -771,45 +775,59 @@ func parseTmpl(name string, markup string) (*template.Template, error) {
 		return tmpl, err
 	}
 
+	tmplsMu.Lock()
 	tmpls[name] = tmpl
+	tmplsMu.Unlock()
 
 	return tmpl, nil
 }
 
+var emailTmplsMu sync.RWMutex
 var emailTmpls = map[string]*template.Template{}
 
 func parseEmailTmpl(name string, markup string) (*template.Template, error) {
-	if tmpl, ok := emailTmpls[name]; ok {
+	emailTmplsMu.RLock()
+	tmpl, ok := emailTmpls[name]
+	emailTmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
-	tmpl := template.New(name)
+	tmpl = template.New(name)
 
 	tmpl, err := tmpl.Parse(markup)
 	if err != nil {
 		return tmpl, fmt.Errorf("parseEmailTmpl.Parse: %w", err)
 	}
 
+	emailTmplsMu.Lock()
 	emailTmpls[name] = tmpl
+	emailTmplsMu.Unlock()
 
 	return tmpl, nil
 }
 
+var textTmplsMu sync.RWMutex
 var textTmpls = map[string]*textTemplate.Template{}
 
 func parseTextTmpl(name string, markup string) (*textTemplate.Template, error) {
-	if tmpl, ok := textTmpls[name]; ok {
+	textTmplsMu.RLock()
+	tmpl, ok := textTmpls[name]
+	textTmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
-	tmpl := textTemplate.New(name)
+	tmpl = textTemplate.New(name)
 
 	tmpl, err := tmpl.Parse(markup)
 	if err != nil {
 		return tmpl, fmt.Errorf("parseTextTmpl.Parse: %w", err)
 	}
 
+	textTmplsMu.Lock()
 	textTmpls[name] = tmpl
+	textTmplsMu.Unlock()
 
 	return tmpl, nil
 }
@@ -1398,7 +1416,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 					checkoutMu.RLock()
 					if _, ok := checkout[monitor.ID]; ok {
 						checkoutMu.RUnlock()
-						return
+						continue
 					}
 					checkoutMu.RUnlock()
 
@@ -3521,6 +3539,15 @@ func main() {
 	selfSignedFlag := flag.Bool("generate-self-signed-cert", false, "")
 
 	flag.Parse()
+
+	if *validateConfigFlag != "" {
+		if err := validateConfig(*validateConfigFlag); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("config ok")
+		return
+	}
 
 	if *selfSignedFlag {
 		GenerateSelfSignedCertificate()
