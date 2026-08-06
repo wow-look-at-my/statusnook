@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: wow-look-at-my/actions@typescript#latest
+        id: meta
+        with:
+          script: |
+            const image = `ghcr.io/${github.repository.toLowerCase()}:latest`;
+            core.setOutput('image', image);
+            core.setOutput('push', String(github.ref === 'refs/heads/main'));
+
+      # Builds on every branch so a broken Dockerfile or a compile error fails
+      # before merge; only main pushes, because :latest is a single mutable tag
+      # that the deployed stack pulls.
+      - uses: wow-look-at-my/actions@ghcr#latest
+        with:
+          token: ${{ github.token }}
+          push_image: ${{ steps.meta.outputs.image }}
+          push: ${{ steps.meta.outputs.push }}
