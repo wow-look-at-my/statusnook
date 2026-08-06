@@ -4082,6 +4082,9 @@ func main() {
 	appWg.Add(1)
 	go notificationLoop(appCtx, &appWg)
 
+	appWg.Add(1)
+	go retentionLoop(appCtx, &appWg)
+
 	var httpServer *http.Server
 	var httpsServer *http.Server
 
@@ -6624,6 +6627,17 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
+	rateLimitKey := loginRateLimitKey(r)
+	if loginRateLimited(rateLimitKey) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`
+			<div id="alert" class="alert" hx-swap-oob="true">
+				Too many failed attempts. Try again later.
+			</div>
+		`))
+		return
+	}
+
 	username := r.PostFormValue("username")
 	if username == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6657,6 +6671,12 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	pwHash, userID, err := getPasswordHash(tx, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// Hash against a throwaway so an unknown username costs the same
+			// ~60ms as a known one. Returning early made the difference a
+			// clean user-enumeration oracle.
+			bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+
+			recordLoginFailure(rateLimitKey)
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`
 				<div id="alert" class="alert" hx-swap-oob="true">
@@ -6671,6 +6691,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(password)); err != nil {
+		recordLoginFailure(rateLimitKey)
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`
 			<div id="alert" class="alert" hx-swap-oob="true">
@@ -6679,6 +6700,8 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		`))
 		return
 	}
+
+	clearLoginFailures(rateLimitKey)
 
 	tokenBytes := make([]byte, 32)
 	_, err = rand.Read(tokenBytes)
