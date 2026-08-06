@@ -119,11 +119,17 @@ func Migration1715019045AddSlugColumns(tx *sql.Tx) error {
 }
 
 func initDB(immediate bool) *sql.DB {
+	// 0700, not ModePerm: app.db holds every live session token, the bcrypt
+	// hashes, the SMTP and Slack credentials, the GitHub PAT, and the AES key
+	// that decrypts every `secret_` value. On a shared host 0755 hands all of
+	// that to any local account.
 	if _, err := os.Stat("statusnook-data"); errors.Is(err, os.ErrNotExist) {
-		err := os.Mkdir("statusnook-data", os.ModePerm)
+		err := os.Mkdir("statusnook-data", 0700)
 		if err != nil {
 			log.Fatalf("initDB.Mkdir: %s", err)
 		}
+	} else if err := os.Chmod("statusnook-data", 0700); err != nil {
+		log.Fatalf("initDB.Chmod: %s", err)
 	}
 
 	dsn := "file:statusnook-data/app.db?_foreign_keys=on&_journal_mode=wal"
@@ -285,7 +291,34 @@ func initDB(immediate bool) *sql.DB {
 		}
 	}
 
+	restrictDBFilePermissions()
+
 	return db
+}
+
+// restrictDBFilePermissions narrows the database files to 0600. SQLite creates
+// them with 0644 minus the umask, and their contents are session tokens,
+// credentials and the secret key -- see the comment in initDB.
+func restrictDBFilePermissions() {
+	for _, name := range []string{
+		"statusnook-data/app.db",
+		"statusnook-data/app.db-wal",
+		"statusnook-data/app.db-shm",
+	} {
+		err := os.Chmod(name, 0600)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		// Loud, because the alternative is a database readable by every
+		// account on the host and nobody knowing.
+		log.Printf(
+			"ERROR restrictDBFilePermissions.Chmod %s: %s -- this file may be "+
+				"readable by other users on this host",
+			name,
+			err,
+		)
+	}
 }
 
 func copyTable(tx *sql.Tx, src string, dst string) error {
@@ -887,7 +920,13 @@ func getPageCtx(r *http.Request) pageCtx {
 		adminArea = true
 	}
 
-	parsedURL, _ := url.ParseRequestURI("https://" + r.Host)
+	// r.Host is client-supplied and net/http admits bytes that fail to parse
+	// here ("%zz", "[bad", "a:b:c"), which returned a nil URL that the
+	// redirect check below dereferenced.
+	hostname := ""
+	if parsedURL, err := url.ParseRequestURI("https://" + r.Host); err == nil {
+		hostname = parsedURL.Hostname()
+	}
 
 	return pageCtx{
 		Status:                   status,
@@ -902,7 +941,7 @@ func getPageCtx(r *http.Request) pageCtx {
 		UnconfirmedDomain:        metaUnconfirmedDomain,
 		HideUnconfirmedDomain:    r.URL.Path == "/admin/settings",
 		ShouldAttemptRedirect: metaSSL == "true" && authCtx.ID != 0 &&
-			metaDomain != "" && parsedURL.Hostname() != metaDomain,
+			metaDomain != "" && hostname != metaDomain,
 		Domain:     metaDomain,
 		ConfigFile: metaConfigFileEnabled,
 	}
@@ -1361,7 +1400,23 @@ func sendMonitorAlertSlack(
 	if err != nil {
 		return fmt.Errorf("sendMonitorAlertSlack.Post: %w", err)
 	}
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
 	resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("sendMonitorAlertSlack.ReadAll: %w", readErr)
+	}
+
+	// A revoked webhook or an archived channel answers 404 invalid_token /
+	// 410 channel_is_archived, which is a perfectly successful HTTP round
+	// trip. Not checking it meant every alert to that channel was dropped in
+	// silence.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf(
+			"sendMonitorAlertSlack.StatusCode %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(respBody)),
+		)
+	}
 
 	return nil
 }
@@ -1470,18 +1525,22 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								monitorReq.Header.Add(k, v)
 							}
 
+							// Cleared each attempt: a 500 on attempt 1 followed by a
+							// connection failure on attempt 2 used to log the failure
+							// with attempt 1's status code still attached.
+							statusCode = sql.NullInt64{}
+
 							resp, reqErr = httpClient.Do(monitorReq)
 							if reqErr != nil {
 								continue
 							}
 
 							_, err = io.Copy(io.Discard, resp.Body)
+							resp.Body.Close()
 							if err != nil {
 								log.Printf("monitorLoop.Copy: %s", err)
 								break
 							}
-
-							resp.Body.Close()
 
 							statusCode = sql.NullInt64{
 								Int64: int64(resp.StatusCode),
@@ -1574,10 +1633,21 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 						}
 
 						if len(channels) > 0 {
+							// ID is 0 only when there is no previous check at all
+							// (getMonitorLogLastChecked returns a zero struct on
+							// ErrNoRows). Without this a monitor added for an endpoint
+							// that is ALREADY down has no happy state to transition
+							// from, so it never alerts -- and every later failure looks
+							// like more of the same. The team first hears about the
+							// outage when it recovers.
+							firstCheck := lastChecked.ID == 0
+
 							lastHappy := lastChecked.ResponseCode.Int32 != 0 &&
 								lastChecked.ResponseCode.Int32 < 400
 
-							if lastHappy && result != "success" || !lastHappy && result == "success" {
+							if firstCheck && result != "success" ||
+								lastHappy && result != "success" ||
+								!lastHappy && result == "success" {
 								status := "down"
 								if result == "success" {
 									status = "up"
@@ -1878,7 +1948,24 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								log.Printf("notificationLoop.Post: %s", err)
 								return
 							}
-							defer resp.Body.Close()
+							slackBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+							resp.Body.Close()
+							if readErr != nil {
+								log.Printf("notificationLoop.ReadAllSlack: %s", readErr)
+								return
+							}
+
+							// Returning here leaves sent_at null, so the next tick
+							// retries. Stamping it on a 404 from a revoked webhook
+							// dropped the alert permanently and reported nothing.
+							if resp.StatusCode != http.StatusOK {
+								log.Printf(
+									"notificationLoop.PostStatusCode %d: %s",
+									resp.StatusCode,
+									strings.TrimSpace(string(slackBody)),
+								)
+								return
+							}
 
 							tx, err := rwDB.Begin()
 							if err != nil {
@@ -5818,7 +5905,44 @@ func getResolve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Access-Control-Expose-Headers", "X-Statusnook")
 }
 
-var crossAuthTokens = map[string]int{}
+// A cross-auth token mints a full admin session, and it travels in a URL
+// query string -- proxy logs, browser history, Referer. Short-lived and
+// single-use is the only thing keeping that from being a permanent
+// credential lying around in logs.
+const crossAuthTokenTTL = time.Minute
+
+type crossAuthToken struct {
+	userID   int
+	issuedAt time.Time
+}
+
+var crossAuthTokensMu sync.Mutex
+var crossAuthTokens = map[string]crossAuthToken{}
+
+// redeemCrossAuthToken consumes a token, whatever the outcome: a token that
+// was presented once is spent, valid or not.
+func redeemCrossAuthToken(token string) (int, bool) {
+	crossAuthTokensMu.Lock()
+	defer crossAuthTokensMu.Unlock()
+
+	now := time.Now().UTC()
+
+	// Sweep here rather than on a timer: the map only grows when someone
+	// issues a token, and this runs on the path that follows.
+	for k, v := range crossAuthTokens {
+		if now.Sub(v.issuedAt) > crossAuthTokenTTL {
+			delete(crossAuthTokens, k)
+		}
+	}
+
+	v, ok := crossAuthTokens[token]
+	delete(crossAuthTokens, token)
+	if !ok || now.Sub(v.issuedAt) > crossAuthTokenTTL {
+		return 0, false
+	}
+
+	return v.userID, true
+}
 
 func postResolve(w http.ResponseWriter, r *http.Request) {
 	tokenBytes := make([]byte, 32)
@@ -5832,13 +5956,42 @@ func postResolve(w http.ResponseWriter, r *http.Request) {
 	token := base64.URLEncoding.EncodeToString(tokenBytes)
 
 	authCtx := getAuthCtx(r)
-	crossAuthTokens[token] = authCtx.ID
+
+	crossAuthTokensMu.Lock()
+	crossAuthTokens[token] = crossAuthToken{userID: authCtx.ID, issuedAt: time.Now().UTC()}
+	crossAuthTokensMu.Unlock()
 
 	w.Write([]byte(token))
 }
 
+// safeAfterPath keeps the "after" parameter to a path on this host. Anything
+// else is an open redirect: an "@host/x" value terminates the authority's
+// userinfo, so the browser lands on evil.example.com while the URL still
+// opens with the real status domain.
+func safeAfterPath(after string) string {
+	if after == "" {
+		return "/"
+	}
+
+	parsed, err := url.Parse(after)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Opaque != "" {
+		return "/"
+	}
+
+	path := parsed.EscapedPath()
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		return "/"
+	}
+
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+
+	return path
+}
+
 func getCrossAuth(w http.ResponseWriter, r *http.Request) {
-	redirectURL := "https://" + metaDomain + r.URL.Query().Get("after")
+	redirectURL := "https://" + metaDomain + safeAfterPath(r.URL.Query().Get("after"))
 
 	auth := getAuthCtx(r)
 	if auth.ID != 0 {
@@ -5852,7 +6005,7 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, ok := crossAuthTokens[tokenParam]
+	userID, ok := redeemCrossAuthToken(tokenParam)
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -5897,7 +6050,6 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	delete(crossAuthTokens, tokenParam)
 
 	http.SetCookie(
 		w,
@@ -8826,7 +8978,20 @@ func deleteMonitorByID(tx *sql.Tx, id int) error {
 }
 
 func deleteMonitor(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	// Every create and edit handler has this gate; the four delete handlers
+	// did not, so config-file mode hid the buttons while the routes still
+	// worked -- and under GitHub-managed config the deleted entity does not
+	// come back, because the webhook skips a config whose SHA is unchanged.
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	tx, err := rwDB.Begin()
 	if err != nil {
@@ -12301,6 +12466,11 @@ func deleteServiceByID(tx *sql.Tx, id int) error {
 }
 
 func deleteService(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -12317,7 +12487,11 @@ func deleteService(w http.ResponseWriter, r *http.Request) {
 
 	err = deleteServiceByID(tx, id)
 	if err != nil {
+		// Without the return this committed an empty transaction and
+		// redirected as though the delete had worked.
 		log.Printf("deleteService.deleteServiceByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	err = tx.Commit()
@@ -13388,7 +13562,10 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 	} else if notificationType == "slack" {
 		webhookURL, err := url.ParseRequestURI(r.PostFormValue("webhook-url"))
 		if err != nil {
+			// ParseRequestURI returns a nil URL alongside the error, and the
+			// code below calls String() on it.
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
 		tx, err := rwDB.Begin()
@@ -14108,7 +14285,10 @@ func postEditNotification(w http.ResponseWriter, r *http.Request) {
 	} else if channel.Type == "slack" {
 		webhookURL, err := url.ParseRequestURI(r.PostFormValue("webhook-url"))
 		if err != nil {
+			// ParseRequestURI returns a nil URL alongside the error, and the
+			// code below calls String() on it.
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
 		details := SlackNotificationDetails{
@@ -14166,6 +14346,11 @@ func deleteNotificationChannelByID(tx *sql.Tx, id int) error {
 }
 
 func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -14183,6 +14368,8 @@ func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
 	err = deleteNotificationChannelByID(tx, id)
 	if err != nil {
 		log.Printf("deleteNotificationChannel.deleteNotificationChannelByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	err = tx.Commit()
@@ -14918,6 +15105,11 @@ func deleteMailGroupByID(tx *sql.Tx, id int) error {
 }
 
 func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -17657,6 +17849,11 @@ func postGenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func configWebhook(w http.ResponseWriter, r *http.Request) {
+	// Public route, and the whole body is buffered before the signature is
+	// checked. GitHub caps webhook payloads at 25 MB; without a cap here an
+	// unauthenticated client streams until the 30s read timeout, repeatedly.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("configWebhook.BeginRead: %s", err)
@@ -17791,7 +17988,9 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, err := io.ReadAll(r.Body)
+		// resp, not r: the request body was drained long ago, so reading it
+		// here logged an empty string and threw away GitHub's reason.
+		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("configWebhook.ReadAllNon200: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -17799,7 +17998,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if string(respBody) != "" {
-			log.Printf("configWebhook.StatusCode: %s", string(respBody))
+			log.Printf("configWebhook.StatusCode %d: %s", resp.StatusCode, string(respBody))
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -17840,7 +18039,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		msgs, err := applyConfig(tx, content)
 		if err != nil {
 			unwrappedErr := errors.Unwrap(err)
-			if !strings.HasPrefix(unwrappedErr.Error(), "yaml:") {
+			if unwrappedErr == nil || !strings.HasPrefix(unwrappedErr.Error(), "yaml:") {
 				log.Printf("configWebhook.applyConfig: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -17859,6 +18058,51 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			configErrors = string(msgsBytes)
+
+			// applyConfig writes as it validates, deletes included, so by the
+			// time one bad monitor produces a message the services, channels
+			// and monitors the file no longer mentions are already gone. Throw
+			// the whole apply away and record only the errors, the way the
+			// admin editor path does. githubConfigSHA deliberately stays
+			// unchanged so a corrected push re-applies instead of being
+			// skipped as already-seen.
+			if err := tx.Rollback(); err != nil {
+				log.Printf("configWebhook.RollbackInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			errTx, err := rwDB.Begin()
+			if err != nil {
+				log.Printf("configWebhook.BeginInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			defer errTx.Rollback()
+
+			if err := updateMetaValue(errTx, "githubConfigErrors", configErrors); err != nil {
+				log.Printf("configWebhook.updateMetaValueGitHubConfigErrorsInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			if err := updateMetaValue(errTx, "configFile", string(content)); err != nil {
+				log.Printf("configWebhook.updateMetaValueConfigFileInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			if err := errTx.Commit(); err != nil {
+				log.Printf("configWebhook.CommitInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			// 422 rather than 200: GitHub records the response in the webhook
+			// delivery log, which is the only place a pusher looks.
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			w.Write(msgsBytes)
+			return
 		}
 
 		err = updateMetaValue(tx, "githubConfigErrors", string(configErrors))
@@ -17885,7 +18129,10 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Fatalf("configWebhook.getMetaValueName: %s", err)
+		// log.Fatalf here let any DB error on a webhook GitHub delivers kill
+		// the process outright, abandoning the open write transaction.
+		log.Printf("configWebhook.getMetaValueName: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -17992,7 +18239,8 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Fatalf("postConfig.getMetaValueSetupName: %s", err)
+		log.Printf("postConfig.getMetaValueSetupName: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -18492,6 +18740,27 @@ func getSetupDomain(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// randomNS picks one NS record from an authority section. The section is not
+// guaranteed to hold any: an authoritative NOERROR answer carries none, and a
+// NODATA answer carries an SOA. Indexing it blind panicked twice over --
+// mathRand.Intn(0), and an unchecked assertion on *dns.SOA -- and one caller
+// is monitorUnconfirmedDomainLoop, a bare goroutine where a panic takes the
+// process with it.
+func randomNS(section []dns.RR) (string, bool) {
+	nsRecords := []*dns.NS{}
+	for _, rr := range section {
+		if ns, ok := rr.(*dns.NS); ok {
+			nsRecords = append(nsRecords, ns)
+		}
+	}
+
+	if len(nsRecords) == 0 {
+		return "", false
+	}
+
+	return nsRecords[mathRand.Intn(len(nsRecords))].Ns, true
+}
+
 func lookupDomain(domain string) (bool, error) {
 	rootServers := []string{
 		"a.root-servers.net",
@@ -18522,7 +18791,10 @@ func lookupDomain(domain string) (bool, error) {
 		return false, nil
 	}
 
-	authorityNS := r.Ns[mathRand.Intn(len(r.Ns))].(*dns.NS).Ns
+	authorityNS, ok := randomNS(r.Ns)
+	if !ok {
+		return false, nil
+	}
 	m = &dns.Msg{}
 	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.SetEdns0(4096, false)
@@ -18534,7 +18806,10 @@ func lookupDomain(domain string) (bool, error) {
 		return false, nil
 	}
 
-	domainNS := r.Ns[mathRand.Intn(len(r.Ns))].(*dns.NS).Ns
+	domainNS, ok := randomNS(r.Ns)
+	if !ok {
+		return false, nil
+	}
 	m = &dns.Msg{}
 	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.SetEdns0(4096, false)
