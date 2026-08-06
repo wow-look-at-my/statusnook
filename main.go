@@ -3750,6 +3750,23 @@ func main() {
 	if BUILD == "dev" {
 		r.Use(middleware.Logger)
 	}
+
+	// No CSP: the pages carry inline <script> blocks that would need nonces
+	// first. The rest cost nothing. X-Frame-Options matters more than usual
+	// here -- the CSRF token is injected by the page's own JavaScript, so a
+	// framed admin's click carries a valid token.
+	r.Use(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS != nil {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			h.ServeHTTP(w, r)
+		})
+	})
+
 	if BUILD == "release" && metaSSL == "true" {
 		r.Use(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3780,9 +3797,12 @@ func main() {
 	}
 	r.Use(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// /healthz is exempt so a probe still answers on an instance
+			// nobody has finished setting up.
 			if metaSetup != "done" &&
 				!strings.HasPrefix(r.URL.Path, "/setup") &&
-				!strings.HasPrefix(r.URL.Path, "/static") {
+				!strings.HasPrefix(r.URL.Path, "/static") &&
+				r.URL.Path != "/healthz" {
 				http.Redirect(w, r, "/setup", http.StatusFound)
 				return
 			}
@@ -3791,6 +3811,14 @@ func main() {
 	})
 	r.Use(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Neither static assets nor the health probe have a session to
+			// look up, and this middleware opens a transaction for every
+			// request that reaches it -- every image and font included.
+			if strings.HasPrefix(r.URL.Path, "/static") || r.URL.Path == "/healthz" {
+				h.ServeHTTP(w, r)
+				return
+			}
+
 			tx, err := db.Begin()
 			if err != nil {
 				log.Printf("adminMiddleware.Begin: %s", err)
@@ -3838,6 +3866,16 @@ func main() {
 
 	fs := http.FileServer(http.FS(staticFS))
 	r.Get("/static/*", neuter(fs).ServeHTTP)
+
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if err := db.PingContext(r.Context()); err != nil {
+			log.Printf("healthz.Ping: %s", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("database unreachable"))
+			return
+		}
+		w.Write([]byte("ok"))
+	})
 	r.Route("/", func(r chi.Router) {
 		r.Use(statusMiddleware)
 		r.Get("/", index)
@@ -4033,12 +4071,6 @@ func main() {
 	r.Post("/subscribe/email", postSubscribeEmail)
 	r.Get("/subscribe/email/confirm", getSubscribeEmailConfirm)
 	r.Post("/subscribe/email/confirm", postSubscribeEmailConfirm)
-	r.Post("/test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("aa") == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	})
-
 	appCtx, cancelAppCtx = context.WithCancel(context.Background())
 
 	shutdownCh := make(chan os.Signal, 1)
@@ -4376,18 +4408,22 @@ func slackOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func postmarkDeleteSuppression(email string, token string, stream string) error {
-	body := fmt.Sprintf(
-		`
-		{
-			"Suppressions": [
-				{
-					"EmailAddress": "%s"
-				}
-			]
-		}
-		`,
-		email,
-	)
+	// Marshalled, not Sprintf'd: email arrives from an unauthenticated form,
+	// and mail.ParseAddress accepts quoted local parts containing escaped
+	// quotes, which broke straight out of the string literal.
+	bodyBytes, err := json.Marshal(struct {
+		Suppressions []struct {
+			EmailAddress string `json:"EmailAddress"`
+		} `json:"Suppressions"`
+	}{
+		Suppressions: []struct {
+			EmailAddress string `json:"EmailAddress"`
+		}{{EmailAddress: email}},
+	})
+	if err != nil {
+		return fmt.Errorf("postmarkDeleteSuppression.Marshal: %w", err)
+	}
+	body := string(bodyBytes)
 
 	httpClient := http.Client{
 		Timeout: time.Second * 10,
@@ -4592,7 +4628,12 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 				}
 				defer tx.Rollback()
 
-				subscription, err := getAlertSubscriptionByEmail(tx, email)
+				// v.EmailAddress, not email: this loop deactivates the
+				// subscription of each SUPPRESSED address. Looking up the
+				// requester instead meant one subscriber gated the whole dump --
+				// either every suppressed address was deactivated or none was,
+				// depending on whether the person subscribing already had a row.
+				subscription, err := getAlertSubscriptionByEmail(tx, v.EmailAddress)
 				if err != nil {
 					if !errors.Is(err, sql.ErrNoRows) {
 						supressionSyncMu.Unlock()
@@ -4735,7 +4776,20 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 
 	smtpDetail, ok := channel.Details.(SMTPNotificationDetails)
 	if !ok {
-		log.Printf("postSubscribeEmail.NotificationDetailsAssert: %s", err)
+		// err is nil here, so the old "%s" printed %!s(<nil>).
+		log.Printf("postSubscribeEmail.NotificationDetailsAssert: channel %d is not SMTP", channel.ID)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Committed before the SMTP conversation, not after. rwDB is a single
+	// connection opened IMMEDIATE, and net/smtp has no dial timeout, so
+	// holding the transaction across a send to an unreachable host let one
+	// unauthenticated request block every writer -- monitor logging included --
+	// for the OS connect timeout. The pending row is all the confirm flow
+	// needs; the send is best-effort and already logged when it fails.
+	if err := tx.Commit(); err != nil {
+		log.Printf("postSubscribeEmail.Commit: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -4812,13 +4866,6 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 	)
 	if err != nil {
 		log.Printf("postSubscribeEmail.SendMail: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("postSubscribeEmail.Commit: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -15287,6 +15334,15 @@ func updateCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A 403 rate-limit body unmarshals cleanly into an empty release, whose
+	// blank tag semver.Compare ranks below any real version -- so a failed
+	// check rendered as "Statusnook is up to date".
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("updateCheck.StatusCode %d: %s", resp.StatusCode, string(body))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	type GitHubReleaseAsset struct {
 		Name string `json:"name"`
 	}
@@ -15468,6 +15524,12 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("postUpdate.StatusCode %d: %s", resp.StatusCode, string(body))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	type GitHubReleaseAsset struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
@@ -15516,7 +15578,17 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	downloadReq.Header.Add("Accept", "application/octet-stream")
 
-	resp, err = httpClient.Do(downloadReq)
+	// Its own client: httpClient's 10s Timeout is a whole-request deadline
+	// that covers the body read, so it aborted the copy partway through a
+	// multi-megabyte binary on any link slower than ~2 MB/s.
+	downloadClient := http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+		},
+	}
+
+	resp, err = downloadClient.Do(downloadReq)
 	if err != nil {
 		log.Printf("postUpdate.DoDownload: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -15524,34 +15596,56 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	err = os.Remove("statusnook")
-	if err != nil {
-		log.Printf("postUpdate.Remove: %s", err)
+	// The status was never checked, so a 403 rate-limit body was written over
+	// the binary, chmod 0700, and the process then SIGINT'd itself into a
+	// restart loop on a JSON file.
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("postUpdate.DownloadStatusCode: %d", resp.StatusCode)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	file, err := os.Create("statusnook")
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("postUpdate.Executable: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Download beside the binary, then rename over it. os.Remove first left
+	// nothing to fall back to the moment anything after it failed, and rename
+	// within a directory is atomic.
+	tmpPath := exePath + ".new"
+
+	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0700)
 	if err != nil {
 		log.Printf("postUpdate.Create: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = file.Chmod(0700)
-	if err != nil {
-		log.Printf("postUpdate.Chmod: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
+		file.Close()
+		os.Remove(tmpPath)
 		log.Printf("postUpdate.Copy: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	file.Close()
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Close: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Rename: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	const markup = `
 		<div 
