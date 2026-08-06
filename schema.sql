@@ -84,7 +84,7 @@ create table alert_setting(
 
 create table pending_email_alert_subscription(
     id integer primary key,
-    token string not null,
+    token text not null,
     email text not null collate nocase,
     created_at datetime not null,
     confirmed_at datetime
@@ -246,3 +246,31 @@ values
         'managed-subscriptions',
         true
     );
+-- Every lookup below was a full table scan without these. Verified with
+-- EXPLAIN QUERY PLAN: each becomes a SEARCH.
+--
+-- mail_group_member(mail_group_id) is deliberately absent: unique(mail_group_id,
+-- email_address) already indexes that prefix.
+
+create index idx_alert_notification_unsent
+    on alert_notification(sent_at) where sent_at is null;
+
+create index idx_alert_message_alert_id on alert_message(alert_id);
+
+create index idx_alert_service_alert_id on alert_service(alert_id);
+
+create index idx_alert_ongoing on alert(ended_at) where ended_at is null;
+
+create index idx_mail_group_monitor_monitor_id on mail_group_monitor(monitor_id);
+
+create index idx_pending_email_alert_subscription_email
+    on pending_email_alert_subscription(email);
+
+create index idx_pending_email_alert_subscription_token
+    on pending_email_alert_subscription(token);
+
+create index idx_alert_subscription_destination on alert_subscription(destination);
+
+create index idx_alert_subscription_meta on alert_subscription(meta);
+
+create index idx_session_user_id on session(user_id);
