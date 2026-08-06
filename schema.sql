@@ -25,6 +25,7 @@ create table session(
     id integer primary key,
     token text not null unique,
     csrf_token text not null unique,
+    created_at datetime not null,
     user_id int references user(id) on delete cascade not null
 );
 
@@ -274,3 +275,5 @@ create index idx_alert_subscription_destination on alert_subscription(destinatio
 create index idx_alert_subscription_meta on alert_subscription(meta);
 
 create index idx_session_user_id on session(user_id);
+
+create index idx_session_created_at on session(created_at);

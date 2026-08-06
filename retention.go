@@ -47,6 +47,16 @@ func retentionLoop(ctx context.Context, wg *sync.WaitGroup) {
 func pruneOnce() {
 	now := time.Now().UTC()
 
+	// A session past its lifetime no longer validates, so the row is dead
+	// weight; nothing ever deleted it and the table grew a row per login.
+	prune(
+		"session",
+		`delete from session where id in (
+			select id from session where created_at < ? limit ?
+		)`,
+		now.Add(-sessionLifetime),
+	)
+
 	prune(
 		"monitor_log",
 		`delete from monitor_log where id in (

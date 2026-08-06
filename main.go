@@ -5674,7 +5674,7 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -6313,7 +6313,7 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -6963,7 +6963,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -18807,12 +18807,18 @@ func postSecret(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sessionLifetime is how long a session token stays valid. Sessions used to
+// carry no timestamp and the cookie was set to expire in 100 years, so a token
+// recovered from a backup or an old browser profile was a permanent admin
+// credential.
+const sessionLifetime = 30 * 24 * time.Hour
+
 func createSession(tx *sql.Tx, token string, csrfToken string, userID int) error {
 	const query = `
-		insert into session(token, csrf_token, user_id) values(?, ?, ?)
+		insert into session(token, csrf_token, created_at, user_id) values(?, ?, ?, ?)
 	`
 
-	_, err := tx.Exec(query, token, csrfToken, userID)
+	_, err := tx.Exec(query, token, csrfToken, time.Now().UTC(), userID)
 	if err != nil {
 		return fmt.Errorf("createSession.Exec: %w", err)
 	}
@@ -18825,12 +18831,13 @@ func validateSession(tx *sql.Tx, token string) (int, string, error) {
 		select user.id, session.csrf_Token
 		from user
 		left join session on session.user_id = user.id
-		where session.token = ?
+		where session.token = ? and session.created_at > ?
 	`
 
 	userID := 0
 	csrfToken := ""
-	err := tx.QueryRow(query, token).Scan(&userID, &csrfToken)
+	err := tx.QueryRow(query, token, time.Now().UTC().Add(-sessionLifetime)).
+		Scan(&userID, &csrfToken)
 	if err != nil {
 		return userID, csrfToken, err
 	}
@@ -19726,7 +19733,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
