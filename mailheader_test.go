@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
 )
@@ -11,14 +13,11 @@ func TestHeaderValueStripsCRLF(t *testing.T) {
 	injected := "Outage\r\nBcc: attacker@example.com"
 
 	got := headerValue(injected)
-	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("headerValue(%q) = %q, still contains CR or LF", injected, got)
-	}
-	if !strings.HasPrefix(got, "Outage") {
-		t.Errorf("headerValue(%q) = %q, lost the original text", injected, got)
-	}
+	require.False(t, strings.ContainsAny(got, "\r\n"))
 
-	if got := headerValue("Plain title"); got != "Plain title" {
-		t.Errorf("headerValue rewrote a clean value: %q", got)
-	}
+	assert.True(t, strings.HasPrefix(got, "Outage"))
+
+	got = headerValue("Plain title")
+	assert.Equal(t, "Plain title", got)
+
 }

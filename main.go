@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"cmp"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -248,9 +248,9 @@ func initDB(immediate bool) *sql.DB {
 				existingMigrations[name] = true
 			}
 
-				if err := rows.Err(); err != nil {
-					log.Fatalf("initDB.RowsErrMigration: %s", err)
-				}
+			if err := rows.Err(); err != nil {
+				log.Fatalf("initDB.RowsErrMigration: %s", err)
+			}
 
 			for _, file := range files {
 				name := migrationName(file.Name())
@@ -6305,7 +6305,6 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
 
 	http.SetCookie(
 		w,
