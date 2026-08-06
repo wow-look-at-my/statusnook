@@ -119,6 +119,17 @@ func Migration1715019045AddSlugColumns(tx *sql.Tx) error {
 	return nil
 }
 
+// migrationName strips the extension from a migration filename.
+//
+// TrimRight takes a CUTSET, not a suffix, so the old spelling turned
+// "..._add_slug_columns.sql" into "..._add_slug_column" -- eating the trailing
+// "s" too. Harmless while both the write and the compare were equally wrong,
+// but two migrations differing only by a trailing s or l would collapse onto
+// one name and hit the unique constraint, which is a log.Fatalf at startup.
+func migrationName(fileName string) string {
+	return strings.TrimSuffix(fileName, ".sql")
+}
+
 func initDB(immediate bool) *sql.DB {
 	// 0700, not ModePerm: app.db holds every live session token, the bcrypt
 	// hashes, the SMTP and Slack credentials, the GitHub PAT, and the AES key
@@ -188,7 +199,7 @@ func initDB(immediate bool) *sql.DB {
 				if i < len(files)-1 {
 					placeholders += ", "
 				}
-				params = append(params, strings.TrimRight(v.Name(), ".sql"), true)
+				params = append(params, migrationName(v.Name()), true)
 			}
 
 			insertMigrationQuery := fmt.Sprintf(
@@ -242,10 +253,20 @@ func initDB(immediate bool) *sql.DB {
 				}
 
 			for _, file := range files {
-				migrationName := strings.TrimRight(file.Name(), ".sql")
-				if _, ok := existingMigrations[migrationName]; ok {
+				name := migrationName(file.Name())
+
+				// Installs that ran the old TrimRight spelling recorded the
+				// truncated name, so both count as already-applied. Without
+				// this the rename re-runs every migration whose name ends in a
+				// character from ".sql".
+				_, applied := existingMigrations[name]
+				if !applied {
+					_, applied = existingMigrations[strings.TrimRight(file.Name(), ".sql")]
+				}
+				if applied {
 					continue
 				}
+				migrationName := name
 
 				data, err := migrationsFS.ReadFile(path.Join("migrations", file.Name()))
 				if err != nil {
@@ -1084,7 +1105,6 @@ func createMonitorLogLastChecked(
 		startedAt,
 		monitorID,
 		monitorLogID,
-		monitorLogID,
 	)
 	if err != nil {
 		return fmt.Errorf("createMonitorLogLastChecked.Exec: %w", err)
@@ -1449,7 +1469,12 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 	lastChecked := map[int]time.Time{}
 	checkout := map[int]time.Time{}
 
-	tick := time.Tick(time.Millisecond * 500)
+	// NewTicker, not Tick: time.Tick leaks its ticker and its goroutine, and
+	// these loops do exit -- on ctx.Done, and monitorUnconfirmedDomainLoop
+	// returns on its own once the domain resolves.
+	ticker := time.NewTicker(time.Millisecond * 500)
+	defer ticker.Stop()
+	tick := ticker.C
 
 	for {
 		select {
@@ -1500,7 +1525,13 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 					checkout[monitor.ID] = time.Now().UTC()
 					checkoutMu.Unlock()
 
+					// Registered with the app WaitGroup: these outlive the tick
+					// that spawned them by up to attempts x timeout, and on SIGTERM
+					// they were racing db.Close() to write their monitor log.
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
+
 						var endedAt time.Time
 
 						defer func() {
@@ -1533,7 +1564,11 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								body = strings.NewReader(monitor.Body.String)
 							}
 
-							monitorReq, err := http.NewRequest(
+							// Carries the app context so a check in flight at SIGTERM
+							// aborts instead of holding shutdown for up to
+							// attempts x timeout.
+							monitorReq, err := http.NewRequestWithContext(
+								ctx,
 								monitor.Method,
 								monitor.URL,
 								body,
@@ -1585,8 +1620,27 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 									String: reqErr.Error(),
 									Valid:  true,
 								}
-								result = "timeout"
+
+								// Only a genuine timeout is reported as one. A DNS
+								// failure, a refused connection and a TLS error are
+								// all *url.Error too, and calling every one of them
+								// "timeout" sends whoever is debugging the outage
+								// looking in the wrong place.
+								if urlErr.Timeout() || errors.Is(reqErr, context.DeadlineExceeded) {
+									result = "timeout"
+								} else {
+									result = "error"
+								}
 							}
+						}
+
+						// attempt is the loop counter, which stops at the index of
+						// the attempt that succeeded -- so a first-try success was
+						// recorded as 0 attempts while a total failure recorded the
+						// full count. The column is shown to the operator.
+						attemptsMade := attempt
+						if result == "success" {
+							attemptsMade = attempt + 1
 						}
 
 						endedAt = time.Now().UTC()
@@ -1604,7 +1658,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 							endedAt,
 							statusCode.Int64,
 							errorMessage,
-							attempt,
+							attemptsMade,
 							result,
 							monitor.ID,
 						)
@@ -1809,7 +1863,9 @@ func listUnsentAlertNotifications(tx *sql.Tx) ([]UnsentAlertNotification, error)
 }
 
 func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
-	tick := time.Tick(time.Second * 10)
+	ticker := time.NewTicker(time.Second * 10)
+	defer ticker.Stop()
+	tick := ticker.C
 	for {
 		select {
 		case <-tick:
@@ -2027,7 +2083,10 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 						} else if notification.Type == "email" {
 							smtpDetail, ok := notificationChannel.Details.(SMTPNotificationDetails)
 							if !ok {
-								log.Printf("notificationLoop.NotificationDetailsAssert: %s", err)
+								log.Printf(
+									"notificationLoop.NotificationDetailsAssert: channel %d is not SMTP",
+									notificationChannel.ID,
+								)
 								return
 							}
 
@@ -2315,7 +2374,10 @@ func attemptCertificateAcquisition(ctx context.Context, domain string) error {
 
 	fileStorage, ok := certmagic.Default.Storage.(*certmagic.FileStorage)
 	if !ok {
-		return fmt.Errorf("attemptCertificateAcquisition.FileStorageAssert: %w", err)
+		// err is nil here, and %w with a nil operand yields an error whose
+		// text is %!w(<nil>) and which errors.As can never match -- so the
+		// caller's ACME-problem branch fell through to "unexpected error".
+		return errors.New("attemptCertificateAcquisition: storage is not a certmagic.FileStorage")
 	}
 
 	err = os.RemoveAll(
@@ -2334,7 +2396,9 @@ func attemptCertificateAcquisition(ctx context.Context, domain string) error {
 }
 
 func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
-	tick := time.Tick(time.Minute * 1)
+	ticker := time.NewTicker(time.Minute * 1)
+	defer ticker.Stop()
+	tick := ticker.C
 
 	for {
 		if metaUnconfirmedDomain == "" || metaUnconfirmedDomainProblem != "" {
@@ -2908,11 +2972,21 @@ func applyConfig(tx *sql.Tx, cfgBytes []byte) ([]string, error) {
 				values := url.Values{}
 				for k, v := range vMap {
 					str := ""
-					if vs, ok := v.(int); ok {
+					switch vs := v.(type) {
+					case int:
 						str = strconv.Itoa(vs)
-					}
-					if vs, ok := v.(string); ok {
+					case string:
 						str = vs
+					default:
+						// A bool or a float used to become the empty string, so
+						// `body: {enabled: true}` sent "enabled=" and said nothing.
+						// The headers and misc maps already report this.
+						msgs = append(
+							msgs,
+							"monitors."+slug+": invalid body value "+k+
+								", must be string or number",
+						)
+						continue
 					}
 					values.Add(k, str)
 				}
@@ -3738,6 +3812,11 @@ func main() {
 	}
 
 	db = initDB(false)
+	// Unbounded by default, so a burst opened an unbounded number of SQLite
+	// connections, each re-running the DSN pragmas. Writes are already
+	// serialized on rwDB below.
+	db.SetMaxOpenConns(max(4, runtime.NumCPU()*4))
+	db.SetMaxIdleConns(4)
 
 	rwDB = initDB(true)
 	rwDB.SetMaxOpenConns(1)
@@ -4190,9 +4269,14 @@ func main() {
 			log.Fatalf("main.ListenHTTPS: %s", err)
 		}
 
+		// Same timeouts as the release path below; the dev server had none.
 		httpServer = &http.Server{
-			Handler:     r,
-			BaseContext: func(listener net.Listener) context.Context { return appCtx },
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      2 * time.Minute,
+			IdleTimeout:       5 * time.Minute,
+			Handler:           r,
+			BaseContext:       func(listener net.Listener) context.Context { return appCtx },
 		}
 
 		go httpServer.Serve(httpLn)
@@ -4277,18 +4361,28 @@ func main() {
 	}
 
 	<-shutdownCh
-	cancelAppCtx()
-	appWg.Wait()
 
-	if err := httpServer.Shutdown(context.Background()); err != nil {
-		panic(err)
+	// Shutdown BEFORE waiting on the loops: it stops accepting new requests
+	// and drains the ones in flight, where the old order kept the listeners
+	// open while the background loops were already winding down.
+	//
+	// Bounded, because Shutdown with a background context waits forever on a
+	// single hung request and Docker or systemd then SIGKILLs instead.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("main.ShutdownHTTP: %s", err)
 	}
 
 	if httpsServer != nil {
-		if err := httpsServer.Shutdown(context.Background()); err != nil {
-			panic(err)
+		if err := httpsServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("main.ShutdownHTTPS: %s", err)
 		}
 	}
+
+	cancelAppCtx()
+	appWg.Wait()
 
 	err = db.Close()
 	if err != nil {
@@ -6249,7 +6343,12 @@ func getOldestAlertDate(tx *sql.Tx) (time.Time, error) {
 	return date, nil
 }
 
-func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
+// periodStart is the first instant of the month being shown; the query bounds
+// on [periodStart, next month) rather than strftime("%Y-%m", created_at) = ?,
+// which is not sargable and made this public page scan the whole alert table.
+func getAlertHistory(tx *sql.Tx, periodStart time.Time) ([]AlertDetail, error) {
+	periodEnd := periodStart.AddDate(0, 1, 0)
+
 	const alertQuery = `
 		select 
 			id,
@@ -6261,13 +6360,13 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		from
 			alert
 		where 
-			strftime("%Y-%m", created_at) = ?
+			created_at >= ? and created_at < ?
 		order by created_at desc
 	`
 
 	alerts := []AlertDetail{}
 
-	rows, err := tx.Query(alertQuery, period)
+	rows, err := tx.Query(alertQuery, periodStart, periodEnd)
 	if err != nil {
 		return alerts, fmt.Errorf("getAlertHistory.Query: %w", err)
 	}
@@ -6442,7 +6541,7 @@ func history(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alerts, err := getAlertHistory(tx, periodParam)
+	alerts, err := getAlertHistory(tx, periodDate)
 	if err != nil {
 		log.Printf("history.listAlerts: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -7303,6 +7402,10 @@ type MonitorLog struct {
 	MonitorID    int
 }
 
+// monitorPollLimit caps the poll handler's query. High enough that a normal
+// poll never notices; low enough that a crafted cursor cannot ask for a day.
+const monitorPollLimit = 500
+
 func listMonitorLogs(tx *sql.Tx, monitorID int, limit int, after int, before int, date time.Time) ([]MonitorLog, error) {
 	query := `
 		select
@@ -7947,7 +8050,11 @@ func getMonitorPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	monitorLogs, err := listMonitorLogs(tx, id, 0, 0, before, date)
+	// Bounded: limit 0 means "no limit" in listMonitorLogs, and this handler
+	// is polled by the browser every 5s. Normal use returns 0-1 rows, but a
+	// crafted ?before= returned every log for the day -- 8,640 at the minimum
+	// frequency.
+	monitorLogs, err := listMonitorLogs(tx, id, monitorPollLimit, 0, before, date)
 	if err != nil {
 		log.Printf("getMonitorPoll.listMonitorLogs: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -17924,12 +18031,14 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if parsedRepoURL.Path == "" {
+			// WriteHeader has to precede Write; the other order sent 200 and
+			// logged "superfluous response.WriteHeader call".
+			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`
 				<div id="alert" class="alert" hx-swap-oob="true">
 					Invalid GitHub repository URL
 				</div>`,
 			))
-			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
