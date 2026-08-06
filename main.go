@@ -2199,7 +2199,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								return
 							}
 
-							tx, err = rwDB.Begin()
+							tx, err := rwDB.Begin()
 							if err != nil {
 								log.Printf("notificationLoop.BeginUpdateAlertSentAtByIDEmail: %s", err)
 								return
