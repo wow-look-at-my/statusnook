@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"cmp"
 	"context"
 	"crypto/aes"
@@ -1832,50 +1833,60 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 					return
 				}
 
+				if len(notifications) == 0 {
+					return
+				}
+
+				// Hoisted out of the per-notification loop below. All four are
+				// constant for the batch, and listUnsentAlertNotifications
+				// returns one row per SUBSCRIBER -- so reloading every active
+				// subscription inside the loop made a single alert update
+				// O(N^2) in subscribers, against the same file the monitor
+				// loop is writing to.
+				tx, err = db.Begin()
+				if err != nil {
+					log.Printf("notificationLoop.ReadBegin: %s", err)
+					return
+				}
+				defer tx.Rollback()
+
+				notificationChannelID, err := getAlertSMTPNotificationSetting(tx)
+				if err != nil {
+					log.Printf("notificationLoop.getAlertSMTPNotificationSetting: %s", err)
+					return
+				}
+
+				notificationChannel, err := getNotificationChannelByID(tx, notificationChannelID)
+				if err != nil {
+					log.Printf("notificationLoop.getNotificationChannelByID: %s", err)
+					return
+				}
+
+				alertSettings, err := getAlertSettings(tx)
+				if err != nil {
+					log.Printf("notificationLoop.getAlertSettings: %s", err)
+					return
+				}
+
+				emailSubs, err := listActiveAlertEmailSubscriptions(tx)
+				if err != nil {
+					log.Printf("notificationLoop.listActiveAlertEmailSubscriptions: %s", err)
+					return
+				}
+
+				subTokensEmailMap := make(map[string]string, len(emailSubs))
+				for _, v := range emailSubs {
+					subTokensEmailMap[v.Destination] = v.Meta
+				}
+
+				err = tx.Commit()
+				if err != nil {
+					log.Printf("notificationLoop.ReadCommit: %s", err)
+					return
+				}
+
 				for _, notification := range notifications {
 					func() {
-						tx, err := db.Begin()
-						if err != nil {
-							log.Printf("notificationLoop.ReadBegin: %s", err)
-							return
-						}
-						defer tx.Rollback()
-
-						notificationChannelID, err := getAlertSMTPNotificationSetting(tx)
-						if err != nil {
-							log.Printf("notificationLoop.getAlertSMTPNotificationSetting: %s", err)
-							return
-						}
-
-						notificationChannel, err := getNotificationChannelByID(tx, notificationChannelID)
-						if err != nil {
-							log.Printf("notificationLoop.getNotificationChannelByID: %s", err)
-							return
-						}
-
-						alertSettings, err := getAlertSettings(tx)
-						if err != nil {
-							log.Printf("notificationLoop.getAlertSettings: %s", err)
-							return
-						}
-
-						emailSubs, err := listActiveAlertEmailSubscriptions(tx)
-						if err != nil {
-							log.Printf("notificationLoop.listActiveAlertEmailSubscriptions: %s", err)
-							return
-						}
-
-						subTokensEmailMap := make(map[string]string, len(emailSubs))
-						for _, v := range emailSubs {
-							subTokensEmailMap[v.Destination] = v.Meta
-						}
-
-						err = tx.Commit()
-						if err != nil {
-							log.Printf("notificationLoop.ReadCommit: %s", err)
-							return
-						}
-
 						severityEmoji := "🟠"
 						if notification.AlertSeverity == "red" {
 							severityEmoji = "🔴"
@@ -2185,6 +2196,33 @@ func getMetaValue(tx *sql.Tx, name string) (string, error) {
 	return v, nil
 }
 
+var staticETags = map[string]string{}
+
+// serveDecompressed inflates a gzip-only embedded asset for a client that did
+// not advertise gzip. Rare enough to do on the fly; the alternative is
+// embedding a second copy of every asset.
+func serveDecompressed(w http.ResponseWriter, gzPath string) {
+	file, err := staticFS.Open(gzPath)
+	if err != nil {
+		log.Printf("serveDecompressed.Open %s: %s", gzPath, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	reader, err := gzip.NewReader(file)
+	if err != nil {
+		log.Printf("serveDecompressed.NewReader %s: %s", gzPath, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	if _, err := io.Copy(w, reader); err != nil {
+		log.Printf("serveDecompressed.Copy %s: %s", gzPath, err)
+	}
+}
+
 func neuter(next http.Handler) http.Handler {
 	gzAvailable := map[string]string{}
 	err := fs.WalkDir(staticFS, "static", func(path string, d fs.DirEntry, err error) error {
@@ -2192,6 +2230,13 @@ func neuter(next http.Handler) http.Handler {
 			if strings.HasSuffix(d.Name(), ".gz") {
 				gzAvailable[strings.Replace(path, ".gz", "", 1)] = path
 			}
+
+			contents, err := staticFS.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("neuter.ReadFile %s: %w", path, err)
+			}
+			sum := sha256.Sum256(contents)
+			staticETags[path] = `"` + hex.EncodeToString(sum[:16]) + `"`
 		}
 		return nil
 	})
@@ -2205,12 +2250,39 @@ func neuter(next http.Handler) http.Handler {
 			return
 		}
 
+		// embed.FS reports a zero ModTime, so ServeContent emits no
+		// Last-Modified and there is nothing to revalidate against. Without a
+		// freshness directive every page view re-fetched all 2.1 MB of
+		// static/, monaco included. The assets are baked into the binary, so
+		// they cannot change without the ETag changing with them.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if etag, ok := staticETags[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+			w.Header().Set("ETag", etag)
+			if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
+		// These eleven assets are embedded ONLY in their compressed form --
+		// there is no plain copy to fall back to -- so a client that does not
+		// advertise gzip is served a decompressed copy rather than a response
+		// labelled with an encoding it never asked for.
 		if gzPath, ok := gzAvailable[strings.TrimPrefix(r.URL.Path, "/")]; ok {
-			r.URL.Path = gzPath
-			split := strings.Split(r.URL.Path, ".")
+			split := strings.Split(gzPath, ".")
 			ext := split[len(split)-2]
 			w.Header().Add("Content-Type", mime.TypeByExtension("."+ext))
-			w.Header().Add("Content-Encoding", "gzip")
+			w.Header().Add("Vary", "Accept-Encoding")
+
+			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				r.URL.Path = gzPath
+				w.Header().Add("Content-Encoding", "gzip")
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			serveDecompressed(w, gzPath)
+			return
 		}
 
 		next.ServeHTTP(w, r)
