@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"github.com/stretchr/testify/assert"
+	"testing"
+)
 
 func TestSafeAfterPath(t *testing.T) {
 	// Everything in the first group left the origin before safeAfterPath
@@ -15,9 +18,9 @@ func TestSafeAfterPath(t *testing.T) {
 		"///evil.example.com",
 	}
 	for _, after := range escapes {
-		if got := safeAfterPath(after); got != "/" {
-			t.Errorf("safeAfterPath(%q) = %q, want %q", after, got, "/")
-		}
+		got := safeAfterPath(after)
+		assert.Equal(t, "/", got)
+
 	}
 
 	keeps := map[string]string{
@@ -27,8 +30,8 @@ func TestSafeAfterPath(t *testing.T) {
 		"/admin/monitors?tab=up": "/admin/monitors?tab=up",
 	}
 	for after, want := range keeps {
-		if got := safeAfterPath(after); got != want {
-			t.Errorf("safeAfterPath(%q) = %q, want %q", after, got, want)
-		}
+		got := safeAfterPath(after)
+		assert.Equal(t, want, got)
+
 	}
 }

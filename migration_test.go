@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"github.com/stretchr/testify/assert"
+	"testing"
+)
 
 // TrimRight takes a cutset: "..._add_slug_columns.sql" lost its trailing "s"
 // as well as the extension. Two migrations differing only by a trailing
@@ -16,13 +19,12 @@ func TestMigrationNameStripsOnlyTheExtension(t *testing.T) {
 	}
 
 	for file, want := range cases {
-		if got := migrationName(file); got != want {
-			t.Errorf("migrationName(%q) = %q, want %q", file, got, want)
-		}
+		got := migrationName(file)
+		assert.Equal(t, want, got)
+
 	}
 
 	// The collision the old spelling produced.
-	if migrationName("a_add_call.sql") == migrationName("a_add_calls.sql") {
-		t.Error("two distinct migrations still collapse onto one name")
-	}
+	assert.NotEqual(t, migrationName("a_add_calls.sql"), migrationName("a_add_call.sql"))
+
 }

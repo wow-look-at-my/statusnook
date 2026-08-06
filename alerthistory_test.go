@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
@@ -23,18 +25,14 @@ func TestGetAlertHistoryMatchesTheOldMonthFilter(t *testing.T) {
 		{"after", time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)},
 	}
 	for _, r := range rows {
-		if _, err := rwDB.Exec(
-			`insert into alert(title, type, severity, created_at) values(?, 'incident', 'red', ?)`,
-			r.title, r.createdAt,
-		); err != nil {
-			t.Fatal(err)
-		}
+		_, err := rwDB.Exec(`insert into alert(title, type, severity, created_at) values(?, 'incident', 'red', ?)`, r.title, r.createdAt)
+		require.Nil(t, err)
+
 	}
 
 	tx, err := rwDB.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer tx.Rollback()
 
 	// What the old query returned.
@@ -43,43 +41,31 @@ func TestGetAlertHistoryMatchesTheOldMonthFilter(t *testing.T) {
 		`select title from alert where strftime("%Y-%m", created_at) = ? order by created_at`,
 		"2026-03",
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	for old.Next() {
 		var title string
-		if err := old.Scan(&title); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, old.Scan(&title))
+
 		wantTitles = append(wantTitles, title)
 	}
 	old.Close()
-	if err := old.Err(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, old.Err())
 
-	if len(wantTitles) != 3 {
-		t.Fatalf("the old filter matched %v, want the three March rows -- test setup is wrong",
-			wantTitles)
-	}
+	require.Equal(t, 3, len(wantTitles))
 
 	got, err := getAlertHistory(tx, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
 
 	gotTitles := map[string]bool{}
 	for _, a := range got {
 		gotTitles[a.Title] = true
 	}
 
-	if len(gotTitles) != len(wantTitles) {
-		t.Fatalf("range filter returned %d alerts %v, month filter returned %d %v",
-			len(gotTitles), gotTitles, len(wantTitles), wantTitles)
-	}
+	require.Equal(t, len(wantTitles), len(gotTitles))
+
 	for _, title := range wantTitles {
-		if !gotTitles[title] {
-			t.Errorf("range filter missed %q, which the month filter matched", title)
-		}
+		assert.True(t, gotTitles[title])
+
 	}
 }
