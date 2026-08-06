@@ -47,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	textTemplate "text/template"
 	"time"
@@ -915,15 +916,15 @@ var db *sql.DB
 var appCtx context.Context
 var cancelAppCtx context.CancelFunc
 var rwDB *sql.DB
-var metaSetup string
-var metaName string
-var metaDomain string
-var metaUnconfirmedDomain string
-var metaUnconfirmedDomainProblem string
+var metaSetup atomicString
+var metaName atomicString
+var metaDomain atomicString
+var metaUnconfirmedDomain atomicString
+var metaUnconfirmedDomainProblem atomicString
 
-var metaSSL string
+var metaSSL atomicString
 
-var metaConfigFileEnabled bool
+var metaConfigFileEnabled atomic.Bool
 
 type statusCtxKey struct{}
 
@@ -971,18 +972,18 @@ func getPageCtx(r *http.Request) pageCtx {
 		Status:                   status,
 		Auth:                     authCtx,
 		Index:                    r.URL.Path == "/" || r.URL.Path == "/history",
-		Name:                     metaName,
+		Name:                     metaName.Load(),
 		HXRequest:                r.Header.Get("HX-Request") == "true",
 		HXBoosted:                r.Header.Get("HX-Boosted") == "true",
 		AdminArea:                adminArea,
 		Nav:                      adminURLPrefix,
-		UnconfirmedDomainProblem: metaUnconfirmedDomainProblem,
-		UnconfirmedDomain:        metaUnconfirmedDomain,
+		UnconfirmedDomainProblem: metaUnconfirmedDomainProblem.Load(),
+		UnconfirmedDomain:        metaUnconfirmedDomain.Load(),
 		HideUnconfirmedDomain:    r.URL.Path == "/admin/settings",
-		ShouldAttemptRedirect: metaSSL == "true" && authCtx.ID != 0 &&
-			metaDomain != "" && hostname != metaDomain,
-		Domain:     metaDomain,
-		ConfigFile: metaConfigFileEnabled,
+		ShouldAttemptRedirect: metaSSL.Load() == "true" && authCtx.ID != 0 &&
+			metaDomain.Load() != "" && hostname != metaDomain.Load(),
+		Domain:     metaDomain.Load(),
+		ConfigFile: metaConfigFileEnabled.Load(),
 	}
 }
 
@@ -1269,7 +1270,7 @@ func sendMonitorAlertEmail(
 		[]byte("Subject: " + headerValue(subject) + " \"" +
 			headerValue(monitor.Name) + "\""),
 		[]byte("To: " + headerValue(strings.Join(emailAddresses, ", "))),
-		[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
+		[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -1329,7 +1330,7 @@ func sendMonitorAlertEmail(
 			StatusCode:  int(statusCode.Int64),
 			CheckedAt:   startedAt.Format("2006/01/02 15:04:05 MST"),
 			Result:      result,
-			Domain:      metaDomain,
+			Domain:      metaDomain.Load(),
 		},
 	)
 	if err != nil {
@@ -1418,7 +1419,7 @@ func sendMonitorAlertSlack(
 			StatusCode:  int(statusCode.Int64),
 			CheckedAt:   startedAt.Format("2006/01/02 15:04:05 MST"),
 			Result:      result,
-			Domain:      metaDomain,
+			Domain:      metaDomain.Load(),
 		},
 	)
 	if err != nil {
@@ -1781,7 +1782,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 											result,
 											httpClient,
 											status,
-											metaDomain,
+											metaDomain.Load(),
 										)
 										if err != nil {
 											log.Printf("monitorLoop.sendMonitorAlertSlack: %s", err)
@@ -2027,7 +2028,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									Services:  jsonString(notification.AlertServices),
 									AlertType: notification.AlertType,
 									Severity:  jsonString(severityEmoji),
-									Domain:    jsonString(metaDomain),
+									Domain:    jsonString(metaDomain.Load()),
 								},
 							)
 							if err != nil {
@@ -2096,10 +2097,10 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 							}
 
 							msg := [][]byte{
-								[]byte("Subject: " + headerValue(metaName) + " " + notification.AlertType +
+								[]byte("Subject: " + headerValue(metaName.Load()) + " " + notification.AlertType +
 									" alert: update regarding \"" + headerValue(notification.AlertTitle) + "\""),
 								[]byte("To: " + headerValue(notification.Destination)),
-								[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
+								[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 								[]byte("Content-Type: text/html; charset=UTF-8"),
 							}
 							for k, v := range smtpDetail.Headers {
@@ -2121,7 +2122,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									msg,
 									[]byte("List-Unsubscribe-Post: List-Unsubscribe=One-Click"),
 									[]byte("List-Unsubscribe: "+
-										"<https://"+metaDomain+
+										"<https://"+metaDomain.Load()+
 										"/unsubscribe?token="+subTokensEmailMap[notification.Destination]+">"),
 								)
 							}
@@ -2168,7 +2169,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								}{
 									Notification:         notification,
 									SeverityEmoji:        severityEmoji,
-									Domain:               metaDomain,
+									Domain:               metaDomain.Load(),
 									ManagedSubscriptions: alertSettings.ManagedSubscriptions,
 									SubToken:             subTokensEmailMap[notification.Destination],
 								},
@@ -2406,7 +2407,7 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 	tick := ticker.C
 
 	for {
-		if metaUnconfirmedDomain == "" || metaUnconfirmedDomainProblem != "" {
+		if metaUnconfirmedDomain.Load() == "" || metaUnconfirmedDomainProblem.Load() != "" {
 			wg.Done()
 			return
 		}
@@ -2414,7 +2415,7 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 		select {
 		case <-tick:
 			func() {
-				found, err := lookupDomain(metaUnconfirmedDomain)
+				found, err := lookupDomain(metaUnconfirmedDomain.Load())
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.lookupDomain: %s", err)
 					return
@@ -2424,7 +2425,7 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 					return
 				}
 
-				err = attemptCertificateAcquisition(ctx, metaUnconfirmedDomain)
+				err = attemptCertificateAcquisition(ctx, metaUnconfirmedDomain.Load())
 				if err != nil {
 					unconfirmedDomainProblemMsg := "An unexpected error occurred"
 
@@ -2447,8 +2448,8 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 					}
 					defer tx.Rollback()
 
-					metaUnconfirmedDomainProblem = unconfirmedDomainProblemMsg
-					err = updateMetaValue(tx, "unconfirmedDomainProblem", metaUnconfirmedDomainProblem)
+					metaUnconfirmedDomainProblem.Store(unconfirmedDomainProblemMsg)
+					err = updateMetaValue(tx, "unconfirmedDomainProblem", metaUnconfirmedDomainProblem.Load())
 					if err != nil {
 						log.Printf("monitorUnconfirmedDomainLoop.UpdateUnconfirmedDomainProblem: %s", err)
 						return
@@ -2469,21 +2470,21 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 				}
 				defer tx.Rollback()
 
-				metaDomain = metaUnconfirmedDomain
-				err = updateMetaValue(tx, "domain", metaUnconfirmedDomain)
+				metaDomain.Store(metaUnconfirmedDomain.Load())
+				err = updateMetaValue(tx, "domain", metaUnconfirmedDomain.Load())
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueDomain: %s", err)
 					return
 				}
 
-				metaUnconfirmedDomain = ""
+				metaUnconfirmedDomain.Store("")
 				err = updateMetaValue(tx, "unconfirmedDomain", "")
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomain: %s", err)
 					return
 				}
 
-				metaUnconfirmedDomainProblem = ""
+				metaUnconfirmedDomainProblem.Store("")
 				err = updateMetaValue(tx, "unconfirmedDomainProblem", "")
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomainProblem: %s", err)
@@ -3783,7 +3784,7 @@ func generateConfig(tx *sql.Tx) (string, error) {
 			SlackClientSecret:        alertSettings.SlackClientSecret,
 			SlackInstallURL:          alertSettings.SlackInstallURL,
 		},
-		GeneralSettings: StatusnookConfigGeneralSettings{Name: metaName},
+		GeneralSettings: StatusnookConfigGeneralSettings{Name: metaName.Load()},
 	}
 
 	cfgBytes, err := yaml.Marshal(cfg)
@@ -3838,35 +3839,35 @@ func main() {
 		log.Fatalf("main.getMetaValueSetup: %s", err)
 		return
 	}
-	metaSetup = setup
+	metaSetup.Store(setup)
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueName: %s", err)
 		return
 	}
-	metaName = name
+	metaName.Store(name)
 
 	domain, err := getMetaValue(tx, "domain")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueDomain: %s", err)
 		return
 	}
-	metaDomain = domain
+	metaDomain.Store(domain)
 
 	unconfirmedDomain, err := getMetaValue(tx, "unconfirmedDomain")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueUnconfirmedDomain: %s", err)
 		return
 	}
-	metaUnconfirmedDomain = unconfirmedDomain
+	metaUnconfirmedDomain.Store(unconfirmedDomain)
 
 	unconfirmedDomainProblem, err := getMetaValue(tx, "unconfirmedDomainProblem")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueUnconfirmedDomainProblem: %s", err)
 		return
 	}
-	metaUnconfirmedDomainProblem = unconfirmedDomainProblem
+	metaUnconfirmedDomainProblem.Store(unconfirmedDomainProblem)
 
 	configFileEnabled, err := getMetaValue(tx, "configFileEnabled")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -3874,7 +3875,7 @@ func main() {
 		return
 	}
 	if configFileEnabled == "true" {
-		metaConfigFileEnabled = true
+		metaConfigFileEnabled.Store(true)
 	}
 
 	ssl, err := getMetaValue(tx, "ssl")
@@ -3883,18 +3884,18 @@ func main() {
 		return
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		metaSSL = "true"
+		metaSSL.Store("true")
 		if BUILD == "dev" || *portFlag != 80 {
-			metaSSL = "false"
+			metaSSL.Store("false")
 		}
 
-		err = updateMetaValue(tx, "ssl", metaSSL)
+		err = updateMetaValue(tx, "ssl", metaSSL.Load())
 		if err != nil {
 			log.Printf("main.updateMetaValueSSL: %s", err)
 			return
 		}
 	} else {
-		metaSSL = ssl
+		metaSSL.Store(ssl)
 	}
 
 	_, err = getMetaValue(tx, "secretKey")
@@ -3947,7 +3948,7 @@ func main() {
 		})
 	})
 
-	if BUILD == "release" && metaSSL == "true" {
+	if BUILD == "release" && metaSSL.Load() == "true" {
 		r.Use(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if certmagic.DefaultACME.HandleHTTPChallenge(w, r) {
@@ -3979,7 +3980,7 @@ func main() {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// /healthz is exempt so a probe still answers on an instance
 			// nobody has finished setting up.
-			if metaSetup != "done" &&
+			if metaSetup.Load() != "done" &&
 				!strings.HasPrefix(r.URL.Path, "/setup") &&
 				!strings.HasPrefix(r.URL.Path, "/static") &&
 				r.URL.Path != "/healthz" {
@@ -4307,7 +4308,7 @@ func main() {
 
 		go httpServer.Serve(httpLn)
 
-		if metaSSL == "true" {
+		if metaSSL.Load() == "true" {
 			certmagic.Default.Storage = &certmagic.FileStorage{Path: "certmagic"}
 			certmagic.DefaultACME.Agreed = true
 			certmagic.DefaultACME.CA = CA
@@ -4315,7 +4316,7 @@ func main() {
 
 			domains := []string{}
 			if domain != "" {
-				domains = append(domains, metaDomain)
+				domains = append(domains, metaDomain.Load())
 			}
 
 			tlsConfig, err := certmagic.TLS(domains)
@@ -4997,9 +4998,9 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := [][]byte{
-		[]byte("Subject: Confirm your subscription to " + headerValue(metaName) + " status alerts"),
+		[]byte("Subject: Confirm your subscription to " + headerValue(metaName.Load()) + " status alerts"),
 		[]byte("To: " + headerValue(email)),
-		[]byte("From: " + headerValue(metaName) + " " + "<" + smtpDetail.From + ">"),
+		[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -5041,8 +5042,8 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 			Name string
 			Link string
 		}{
-			Name: metaName,
-			Link: protocol + "://" + metaDomain + "/subscribe/email/confirm?token=" + token,
+			Name: metaName.Load(),
+			Link: protocol + "://" + metaDomain.Load() + "/subscribe/email/confirm?token=" + token,
 		},
 	)
 	if err != nil {
@@ -5328,7 +5329,7 @@ func getUnsubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -5398,7 +5399,7 @@ func postUnsubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -5462,7 +5463,7 @@ func postResubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -6266,7 +6267,7 @@ func safeAfterPath(after string) string {
 }
 
 func getCrossAuth(w http.ResponseWriter, r *http.Request) {
-	redirectURL := "https://" + metaDomain + safeAfterPath(r.URL.Query().Get("after"))
+	redirectURL := "https://" + metaDomain.Load() + safeAfterPath(r.URL.Query().Get("after"))
 
 	auth := getAuthCtx(r)
 	if auth.ID != 0 {
@@ -8220,7 +8221,7 @@ func getMonitorPoll(w http.ResponseWriter, r *http.Request) {
 
 func getEditMonitor(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -9093,7 +9094,7 @@ func updateMonitorSlug(tx *sql.Tx, old string, new string) (int, error) {
 }
 
 func postEditMonitor(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -9335,7 +9336,7 @@ func deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	// did not, so config-file mode hid the buttons while the routes still
 	// worked -- and under GitHub-managed config the deleted entity does not
 	// come back, because the webhook skips a config whose SHA is unchanged.
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -10093,7 +10094,7 @@ func createMonitor(
 }
 
 func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -10821,8 +10822,8 @@ func getAlertNotifications(w http.ResponseWriter, r *http.Request) {
 		Notifications:           notifications,
 		Settings:                settings,
 		SMTPNotificationChannel: smtpNotificationChannelID,
-		Domain:                  metaDomain,
-		ConfigFileEnabled:       metaConfigFileEnabled,
+		Domain:                  metaDomain.Load(),
+		ConfigFileEnabled:       metaConfigFileEnabled.Load(),
 		Ctx:                     getPageCtx(r),
 	})
 	if err != nil {
@@ -10884,7 +10885,7 @@ func updateAlertSMTPNotificationSetting(tx *sql.Tx, notificationID int) error {
 }
 
 func postAlertNotifications(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12779,7 +12780,7 @@ func createService(tx *sql.Tx, slug string, name string, helperText string) erro
 }
 
 func postCreateService(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12843,7 +12844,7 @@ func deleteServiceByID(tx *sql.Tx, id int) error {
 }
 
 func deleteService(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12902,7 +12903,7 @@ func getServiceByID(tx *sql.Tx, id int) (service, error) {
 
 func getEditService(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -13021,7 +13022,7 @@ func updateServiceSlug(tx *sql.Tx, old string, new string) (int, error) {
 }
 
 func postEditService(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -13810,7 +13811,7 @@ func createNotification(
 }
 
 func postCreateNotification(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14096,7 +14097,7 @@ func getNotificationChannelBySlug(tx *sql.Tx, slug string) (NotificationChannel,
 
 func getEditNotification(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14542,7 +14543,7 @@ func updateNotificationChannelSlug(tx *sql.Tx, old string, new string) (int, err
 }
 
 func postEditNotification(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14735,7 +14736,7 @@ func deleteNotificationChannelByID(tx *sql.Tx, id int) error {
 }
 
 func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14914,7 +14915,7 @@ func getCreateMailGroup(w http.ResponseWriter, r *http.Request) {
 
 func getEditMailGroup(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -15429,7 +15430,7 @@ func updateMailGroupMembers(tx *sql.Tx, id int, members []string) error {
 }
 
 func postCreateMailGroup(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -15510,7 +15511,7 @@ func deleteMailGroupByID(tx *sql.Tx, id int) error {
 }
 
 func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -15547,7 +15548,7 @@ func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func postEditMailGroup(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -16703,7 +16704,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 			Ctx                 pageCtx
 		}{
 			CurrentVersion:      VERSION,
-			Domain:              metaDomain,
+			Domain:              metaDomain.Load(),
 			Users:               users,
 			Invitations:         formattedInvitations,
 			Refresh:             refresh,
@@ -16729,7 +16730,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 	domain := strings.ToLower(r.PostFormValue("domain"))
 
 	if name != "" {
-		if metaConfigFileEnabled {
+		if metaConfigFileEnabled.Load() {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -16755,9 +16756,9 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		metaName = name
+		metaName.Store(name)
 
-		escapedName := html.EscapeString(metaName)
+		escapedName := html.EscapeString(metaName.Load())
 
 		w.Write([]byte(
 			fmt.Sprintf(`
@@ -16773,7 +16774,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if domain != "" {
-		if metaSSL != "true" {
+		if metaSSL.Load() != "true" {
 			tx, err := rwDB.Begin()
 			if err != nil {
 				log.Printf("postSettings.BeginUnmanagedDomain: %s", err)
@@ -16817,13 +16818,13 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			metaDomain = domain
+			metaDomain.Store(domain)
 
 			w.Header().Add("HX-Location", "/admin/settings")
 			return
 		}
 
-		if metaDomain == "" {
+		if metaDomain.Load() == "" {
 			tx, err := rwDB.Begin()
 			if err != nil {
 				log.Printf("postSettings.BeginUnconfirmedDomainUpdate: %s", err)
@@ -16866,7 +16867,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			metaUnconfirmedDomain = domain
+			metaUnconfirmedDomain.Store(domain)
 		}
 
 		domainPattern := regexp.MustCompile(`^[a-z0-9]+(?:[\-.][a-z0-9]+)*\.[a-z]+$`)
@@ -16919,7 +16920,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			notFoundMsg := "We didn't find your domain's A record, verify it exists and then retry. " +
 				"If your domain and A record is correct, you might need to wait a few minutes before retrying."
 
-			if metaDomain == "" {
+			if metaDomain.Load() == "" {
 				tx, err := rwDB.Begin()
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblemNotFound: %s", err)
@@ -16962,7 +16963,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				metaUnconfirmedDomainProblem = notFoundMsg
+				metaUnconfirmedDomainProblem.Store(notFoundMsg)
 			}
 
 			w.WriteHeader(http.StatusBadRequest)
@@ -16994,7 +16995,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				log.Printf("postSettings.attemptCertificateAcquisition: %s", err)
 			}
 
-			if metaDomain == "" {
+			if metaDomain.Load() == "" {
 				tx, err := rwDB.Begin()
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblem: %s", err)
@@ -17037,7 +17038,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				metaUnconfirmedDomainProblem = errMsg
+				metaUnconfirmedDomainProblem.Store(errMsg)
 			}
 
 			if errMsg == "An unexpected error occurred" {
@@ -17128,9 +17129,9 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		metaDomain = domain
-		metaUnconfirmedDomain = ""
-		metaUnconfirmedDomainProblem = ""
+		metaDomain.Store(domain)
+		metaUnconfirmedDomain.Store("")
+		metaUnconfirmedDomainProblem.Store("")
 
 		w.Header().Add("HX-Location", "/admin/settings")
 	}
@@ -17161,7 +17162,7 @@ func postSettingsCancelDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaUnconfirmedDomainProblem = v
+	metaUnconfirmedDomainProblem.Store(v)
 
 	w.Header().Add("HX-Location", "/admin/settings")
 }
@@ -17999,7 +18000,7 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 		GitHubConfigPath:    githubFilePath,
 		GitHubToken:         githubToken,
 		GitHubWebhookSecret: githubWebhookSecret,
-		Domain:              metaDomain,
+		Domain:              metaDomain.Load(),
 		Ctx:                 getPageCtx(r),
 	})
 	if err != nil {
@@ -18248,7 +18249,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !metaConfigFileEnabled && configFile {
+	if !metaConfigFileEnabled.Load() && configFile {
 		cfg, err := generateConfig(tx)
 		if err != nil {
 			log.Printf("postConfigSettings.generateConfig: %s", err)
@@ -18271,7 +18272,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaConfigFileEnabled = configFile
+	metaConfigFileEnabled.Store(configFile)
 
 	w.Header().Add("HX-Location", "/admin/settings")
 }
@@ -18601,7 +18602,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
+	metaName.Store(name)
 }
 
 func postConfig(w http.ResponseWriter, r *http.Request) {
@@ -18709,7 +18710,7 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
+	metaName.Store(name)
 
 	w.Write(
 		[]byte(
@@ -19197,7 +19198,7 @@ func getSetupDomain(w http.ResponseWriter, r *http.Request) {
 			Ctx            map[string]string
 		}{
 			DEV:            template.JS(dev),
-			SSL:            metaSSL,
+			SSL:            metaSSL.Load(),
 			PrefillURLText: prefillURLText,
 			Ctx:            map[string]string{},
 		},
@@ -19343,7 +19344,7 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if BUILD == "release" && metaSSL == "true" {
+	if BUILD == "release" && metaSSL.Load() == "true" {
 		found, err := lookupDomain(domainParam)
 		if err != nil {
 			log.Printf("postSetupDomain.lookupDomain: %s", err)
@@ -19457,10 +19458,10 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "account"
-	metaDomain = domainParam
+	metaSetup.Store("account")
+	metaDomain.Store(domainParam)
 
-	if BUILD == "dev" || metaSSL == "false" {
+	if BUILD == "dev" || metaSSL.Load() == "false" {
 		w.Header().Add("HX-Location", "/setup/account")
 	}
 }
@@ -19507,8 +19508,8 @@ func postSetupDomainSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "account"
-	metaUnconfirmedDomain = domainParam
+	metaSetup.Store("account")
+	metaUnconfirmedDomain.Store(domainParam)
 
 	appWg.Add(1)
 	go monitorUnconfirmedDomainLoop(appCtx, &appWg)
@@ -19757,7 +19758,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "name"
+	metaSetup.Store("name")
 
 	http.SetCookie(
 		w,
@@ -19861,8 +19862,8 @@ func postSetupName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
-	metaSetup = "done"
+	metaName.Store(name)
+	metaSetup.Store("done")
 
 	w.Header().Add("HX-Location", "/")
 }

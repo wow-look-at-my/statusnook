@@ -36,9 +36,13 @@ the usual one is not met. `go vet ./...` and `go test ./...` both pass.
   discard the transaction when it returns messages -- `configWebhook` did not,
   and a single bad monitor in a pushed config deleted everything the file no
   longer mentioned.
-- The three template caches and the `meta*` globals are read from HTTP
-  handlers and written from background goroutines. Concurrent map access is a
-  Go runtime fatal error, not a panic: keep the mutexes.
+- The three template caches are read from HTTP handlers and written from the
+  monitor and notification goroutines. Concurrent map access is a Go runtime
+  fatal error, not a panic -- no recover, no shutdown -- so keep the mutexes.
+- The `meta*` globals are read by `getPageCtx` on nearly every request and
+  written by admin handlers and by `monitorUnconfirmedDomainLoop`. They are
+  atomics (`metastate.go`) for that reason; `metaConfigFileEnabled` in
+  particular gates every mutating admin handler.
 - `rwDB` is a single connection opened IMMEDIATE. Never hold its transaction
   across a network call -- an SMTP send once blocked every writer, monitor
   logging included, for the OS connect timeout.
