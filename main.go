@@ -12,6 +12,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -995,7 +996,9 @@ func csrfMiddleware(h http.Handler) http.Handler {
 		csrfToken := r.Header.Get("csrf-token")
 		authCtx := getAuthCtx(r)
 
-		if csrfToken != authCtx.CSRFToken {
+		// Constant-time: a 32-byte token is not realistically timeable over a
+		// network, but the comparison costs nothing either way.
+		if subtle.ConstantTimeCompare([]byte(csrfToken), []byte(authCtx.CSRFToken)) != 1 {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -2016,13 +2019,15 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									Severity  string
 									Domain    string
 								}{
-									Title: strings.ToUpper(notification.AlertType[:1]) +
-										notification.AlertType[1:] + " - " + notification.AlertTitle,
-									Content:   notification.Content,
-									Services:  notification.AlertServices,
+									// Escaped: the template above is text/template, which
+									// escapes nothing, so a quote in a title broke the JSON.
+									Title: jsonString(strings.ToUpper(notification.AlertType[:1]) +
+										notification.AlertType[1:] + " - " + notification.AlertTitle),
+									Content:   jsonString(notification.Content),
+									Services:  jsonString(notification.AlertServices),
 									AlertType: notification.AlertType,
-									Severity:  severityEmoji,
-									Domain:    metaDomain,
+									Severity:  jsonString(severityEmoji),
+									Domain:    jsonString(metaDomain),
 								},
 							)
 							if err != nil {
@@ -5104,14 +5109,25 @@ func getAlertSubscriptionByEmail(tx *sql.Tx, email string) (AlertSubscription, e
 	return sub, nil
 }
 
+// pendingSubscriptionLifetime bounds how long a confirmation link works.
+// Without it the token was replayable forever, and the row it belongs to was
+// never deleted either.
+const pendingSubscriptionLifetime = 24 * time.Hour
+
+// userInvitationLifetime matches the 24h the invitation handlers already
+// enforce when validating a token; expired rows were simply never removed.
+const userInvitationLifetime = 24 * time.Hour
+
 func getPendingEmailAlertSubscriptionEmailByToken(tx *sql.Tx, token string) (string, error) {
 	const query = `
-		select email from pending_email_alert_subscription where token = ? and confirmed_at is null
+		select email from pending_email_alert_subscription
+		where token = ? and confirmed_at is null and created_at > ?
 	`
 
 	var email string
 
-	err := tx.QueryRow(query, token).Scan(&email)
+	err := tx.QueryRow(query, token, time.Now().UTC().Add(-pendingSubscriptionLifetime)).
+		Scan(&email)
 	if err != nil {
 		return email, fmt.Errorf("getPendingEmailAlertSubscriptionEmailByToken.Scan: %w", err)
 	}
@@ -5826,8 +5842,11 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 			return alerts, fmt.Errorf("getOngoingAlerts.Scan3: %w", err)
 		}
 
-		if _, ok := messages[alertID]; !ok {
-			messages[alertID] = []AlertDetailMessage{}
+		// services, not messages: the copy-paste initialised the wrong map, so
+		// an alert with services but no messages was handed an empty Messages
+		// slice and this guard did nothing it was meant to.
+		if _, ok := services[alertID]; !ok {
+			services[alertID] = []AlertDetailService{}
 		}
 		services[alertID] = append(services[alertID], service)
 	}
@@ -6485,8 +6504,11 @@ func getAlertHistory(tx *sql.Tx, periodStart time.Time) ([]AlertDetail, error) {
 			return alerts, fmt.Errorf("getAlertHistory.Scan3: %w", err)
 		}
 
-		if _, ok := messages[alertID]; !ok {
-			messages[alertID] = []AlertDetailMessage{}
+		// services, not messages: the copy-paste initialised the wrong map, so
+		// an alert with services but no messages was handed an empty Messages
+		// slice and this guard did nothing it was meant to.
+		if _, ok := services[alertID]; !ok {
+			services[alertID] = []AlertDetailService{}
 		}
 		services[alertID] = append(services[alertID], service)
 	}
@@ -7821,11 +7843,15 @@ func getMonitorAllLogs(w http.ResponseWriter, r *http.Request) {
 
 	afterParam := r.URL.Query().Get("after")
 	if afterParam == "" {
+		// A bare return sends 200 with an empty body, which reads as "no logs"
+		// rather than "you asked wrong".
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	after, err := strconv.Atoi(afterParam)
 	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
@@ -8200,7 +8226,14 @@ func getEditMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	refreshID := r.URL.Query().Get("refresh")
-	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	// A non-numeric id became 0, which matches no monitor, and the handler
+	// then rendered a page for a monitor that does not exist.
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	tx, err := db.Begin()
 	if err != nil {

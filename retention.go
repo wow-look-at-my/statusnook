@@ -49,6 +49,25 @@ func pruneOnce() {
 
 	// A session past its lifetime no longer validates, so the row is dead
 	// weight; nothing ever deleted it and the table grew a row per login.
+	// Both are fed by public endpoints and neither was ever deleted from:
+	// pending subscriptions accumulate one row per attempted address, and
+	// invitations outlive the 24h at which they stop being accepted.
+	prune(
+		"pending_email_alert_subscription",
+		`delete from pending_email_alert_subscription where id in (
+			select id from pending_email_alert_subscription where created_at < ? limit ?
+		)`,
+		now.Add(-pendingSubscriptionLifetime),
+	)
+
+	prune(
+		"user_invitation",
+		`delete from user_invitation where id in (
+			select id from user_invitation where created_at < ? limit ?
+		)`,
+		now.Add(-userInvitationLifetime),
+	)
+
 	prune(
 		"session",
 		`delete from session where id in (
