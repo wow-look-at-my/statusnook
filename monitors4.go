@@ -46,10 +46,6 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	method := r.PostFormValue("method")
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
 	if method != http.MethodGet &&
 		method != http.MethodPost &&
 		method != http.MethodPatch &&

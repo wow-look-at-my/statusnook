@@ -168,10 +168,6 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 		}
 
 		from := r.PostFormValue("from")
-		if password == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
 		_, err = mail.ParseAddress(from)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)

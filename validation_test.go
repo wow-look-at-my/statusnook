@@ -272,3 +272,140 @@ func (a *testApp) monitor(id int) Monitor {
 
 	return monitor
 }
+
+// The edit form takes the same rich shapes the create form does, and it is the
+// only way to change what an existing monitor sends.
+func TestMonitorEditFormStoresHeadersBodiesAndRecipients(t *testing.T) {
+	app := withTestApp(t)
+
+	channelID := strconv.Itoa(app.createSlackChannel("Chat", "https://hooks.example.com/x"))
+	groupID := strconv.Itoa(app.createMailGroup("Ops", "ops@example.com"))
+	id := app.createMonitor("Ingest", "https://example.com/health")
+	path := "/admin/monitors/" + strconv.Itoa(id) + "/edit"
+
+	resp := app.post(path, url.Values{
+		"name":                  {"Ingest"},
+		"url":                   {"https://example.com/ingest"},
+		"method":                {"POST"},
+		"frequency":             {"30"},
+		"timeout":               {"10"},
+		"attempts":              {"3"},
+		"header-key":            {"Content-Type", "X-Trace"},
+		"header-value":          {"application/json", "on"},
+		"format":                {"json"},
+		"body":                  {`{"ping":1}`},
+		"notification-channels": {channelID},
+		"mail-groups":           {groupID},
+	})
+	require.Less(t, resp.status, 400, resp.body)
+
+	monitor := app.monitor(id)
+	require.Equal(t, "application/json", monitor.RequestHeaders["Content-Type"])
+	require.Equal(t, `{"ping":1}`, monitor.Body.String)
+	require.Equal(t, 30, monitor.Frequency)
+
+	// form-key/form-value wins over body, the same way it does on create.
+	resp = app.post(path, url.Values{
+		"name":       {"Ingest"},
+		"url":        {"https://example.com/ingest"},
+		"method":     {"POST"},
+		"frequency":  {"60"},
+		"timeout":    {"5"},
+		"attempts":   {"1"},
+		"body":       {`{"ping":1}`},
+		"form-key":   {"a", "b"},
+		"form-value": {"1", "2"},
+	})
+	require.Less(t, resp.status, 400, resp.body)
+	require.Equal(t, "a=1&b=2", app.monitor(id).Body.String)
+
+	// The recipient lists arrive as ids, and anything else is a form nobody
+	// could have submitted from the page.
+	for _, field := range []string{"notification-channels", "mail-groups"} {
+		resp = app.post(path, url.Values{
+			"name": {"Ingest"}, "url": {"https://example.com/ingest"},
+			"method": {"GET"}, "frequency": {"60"}, "timeout": {"5"}, "attempts": {"1"},
+			field: {"not-an-id"},
+		})
+		require.Equal(t, http.StatusInternalServerError, resp.status,
+			"%s took a value that is not an id", field)
+	}
+
+	// A monitor that is not there, and an id that is not a number.
+	require.Equal(t, http.StatusBadRequest, app.post("/admin/monitors/99999/edit", url.Values{
+		"name": {"Gone"}, "url": {"https://example.com/x"},
+		"method": {"GET"}, "frequency": {"60"}, "timeout": {"5"}, "attempts": {"1"},
+	}).status)
+}
+
+// Editing an SMTP channel re-validates every field the create form does, and
+// carries the two extras Postmark needs.
+func TestSMTPChannelEditFormRejectsEveryBadField(t *testing.T) {
+	app := withTestApp(t)
+
+	id := strconv.Itoa(app.createSMTPChannel("Mail"))
+	path := "/admin/notifications/" + id + "/edit"
+
+	valid := func() url.Values {
+		return url.Values{
+			"display-name": {"Mail"},
+			"host":         {"smtp.example.com"},
+			"port":         {"587"},
+			"username":     {"statusnook"},
+			"password":     {"shh"},
+			"from":         {"status@example.com"},
+		}
+	}
+
+	for field, bad := range map[string]string{
+		"display-name": "", "host": "", "port": "", "username": "",
+		"password": "", "from": "not-an-address",
+	} {
+		form := valid()
+		form.Set(field, bad)
+
+		require.Equal(t, http.StatusBadRequest, app.post(path, form).status,
+			"a %s of %q was accepted", field, bad)
+	}
+
+	notANumber := valid()
+	notANumber.Set("port", "half past")
+	require.Equal(t, http.StatusBadRequest, app.post(path, notANumber).status)
+
+	withHeaders := valid()
+	withHeaders["header-key"] = []string{"X-Trace", "X-Env"}
+	withHeaders["header-value"] = []string{"on", "test"}
+	require.Less(t, app.post(path, withHeaders).status, 400)
+	require.Equal(t, "on", app.smtpDetails(id).Headers["X-Trace"])
+
+	// Postmark needs both message streams named, since it refuses a send on
+	// the wrong one rather than picking a default.
+	postmark := valid()
+	postmark.Set("host", "smtp.postmarkapp.com")
+	require.Equal(t, http.StatusBadRequest, app.post(path, postmark).status)
+
+	postmark.Set("pm-transactional", "outbound")
+	require.Equal(t, http.StatusBadRequest, app.post(path, postmark).status)
+
+	postmark.Set("pm-broadcast", "broadcast")
+	require.Less(t, app.post(path, postmark).status, 400)
+}
+
+func (a *testApp) smtpDetails(id string) SMTPNotificationDetails {
+	a.t.Helper()
+
+	channelID, err := strconv.Atoi(id)
+	require.NoError(a.t, err)
+
+	tx, err := db.Begin()
+	require.NoError(a.t, err)
+	defer tx.Rollback()
+
+	channel, err := getNotificationChannelByID(tx, channelID)
+	require.NoError(a.t, err)
+
+	details, ok := channel.Details.(SMTPNotificationDetails)
+	require.True(a.t, ok)
+
+	return details
+}

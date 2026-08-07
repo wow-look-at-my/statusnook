@@ -403,4 +403,10 @@ func TestConfigSettingsSurfacesAFailureAtEveryStatement(t *testing.T) {
 
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/admin/settings/config-settings").status)
+
+	// Both settings pages grow a second half once sync is on -- the stored
+	// repository, branch, path and last-applied sha -- which is why they are
+	// swept here rather than with the rest of the GETs.
+	sweepFaults(t, app, http.MethodGet, "/admin/settings", nil)
+	sweepFaults(t, app, http.MethodGet, "/admin/settings/config-settings", nil)
 }
