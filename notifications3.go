@@ -1,9 +1,7 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"net/mail"
@@ -118,86 +116,6 @@ type NotificationChannel struct {
 
 type listNotificationsOptions struct {
 	Type string
-}
-
-func listNotificationChannels(tx *sql.Tx, options listNotificationsOptions) ([]NotificationChannel, error) {
-	const baseQuery = `
-		select id, slug, name, type, details from notification_channel
-	`
-
-	query := baseQuery
-
-	params := []any{}
-
-	if options.Type != "" {
-		query += " where type = ?"
-		params = append(params, options.Type)
-	}
-
-	var channels []NotificationChannel
-
-	rows, err := tx.Query(query, params...)
-	if err != nil {
-		return channels, fmt.Errorf("listNotificationChannels.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var detailsStr string
-		var channel NotificationChannel
-
-		err := rows.Scan(&channel.ID, &channel.Slug, &channel.Name, &channel.Type, &detailsStr)
-		if err != nil {
-			return channels, fmt.Errorf("listNotificationChannels.Scan: %w", err)
-		}
-
-		if channel.Type == "smtp" {
-			var details SMTPNotificationDetails
-
-			err := json.Unmarshal([]byte(detailsStr), &details)
-			if err != nil {
-				return channels, fmt.Errorf("listNotificationChannels.UnmarshalSMTP: %w", err)
-			}
-
-			channel.Details = details
-		} else if channel.Type == "slack" {
-			var details SlackNotificationDetails
-
-			err := json.Unmarshal([]byte(detailsStr), &details)
-			if err != nil {
-				return channels, fmt.Errorf("listNotificationChannels.UnmarshalSlack: %w", err)
-			}
-
-			channel.Details = details
-		}
-
-		channels = append(channels, channel)
-	}
-
-	if err := rows.Err(); err != nil {
-		return channels, fmt.Errorf("listNotificationChannels.RowsErr: %w", err)
-	}
-
-	return channels, nil
-}
-
-func createNotification(
-	tx *sql.Tx,
-	slug string,
-	name string,
-	notificationType string,
-	details string,
-) error {
-	const query = `
-		insert into notification_channel(slug, name, type, details) values(?, ?, ?, ?)
-	`
-
-	_, err := tx.Exec(query, slug, name, notificationType, details)
-	if err != nil {
-		return fmt.Errorf("createNotification.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func postCreateNotification(w http.ResponseWriter, r *http.Request) {
@@ -399,92 +317,6 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/notifications")
 }
 
-func getNotificationChannelByID(tx *sql.Tx, id int) (NotificationChannel, error) {
-	const query = `
-		select id, slug, name, type, details from notification_channel
-		where id = ?
-	`
-
-	var channel NotificationChannel
-	var detailsStr string
-
-	err := tx.QueryRow(query, id).Scan(
-		&channel.ID,
-		&channel.Slug,
-		&channel.Name,
-		&channel.Type,
-		&detailsStr,
-	)
-	if err != nil {
-		return channel, fmt.Errorf("getNotificationChannelByID.QueryRow: %w", err)
-	}
-
-	if channel.Type == "smtp" {
-		var details SMTPNotificationDetails
-
-		err := json.Unmarshal([]byte(detailsStr), &details)
-		if err != nil {
-			return channel, fmt.Errorf("getNotificationChannelByID.UnmarshalSMTP: %w", err)
-		}
-
-		channel.Details = details
-	} else if channel.Type == "slack" {
-		var details SlackNotificationDetails
-
-		err := json.Unmarshal([]byte(detailsStr), &details)
-		if err != nil {
-			return channel, fmt.Errorf("getNotificationChannelByID.UnmarshalSlack: %w", err)
-		}
-
-		channel.Details = details
-	}
-
-	return channel, nil
-}
-
-func getNotificationChannelBySlug(tx *sql.Tx, slug string) (NotificationChannel, error) {
-	const query = `
-		select id, slug, name, type, details from notification_channel
-		where slug = ?
-	`
-
-	var channel NotificationChannel
-	var detailsStr string
-
-	err := tx.QueryRow(query, slug).Scan(
-		&channel.ID,
-		&channel.Slug,
-		&channel.Name,
-		&channel.Type,
-		&detailsStr,
-	)
-	if err != nil {
-		return channel, fmt.Errorf("getNotificationChannelBySlug.QueryRow: %w", err)
-	}
-
-	if channel.Type == "smtp" {
-		var details SMTPNotificationDetails
-
-		err := json.Unmarshal([]byte(detailsStr), &details)
-		if err != nil {
-			return channel, fmt.Errorf("getNotificationChannelBySlug.UnmarshalSMTP: %w", err)
-		}
-
-		channel.Details = details
-	} else if channel.Type == "slack" {
-		var details SlackNotificationDetails
-
-		err := json.Unmarshal([]byte(detailsStr), &details)
-		if err != nil {
-			return channel, fmt.Errorf("getNotificationChannelBySlug.UnmarshalSlack: %w", err)
-		}
-
-		channel.Details = details
-	}
-
-	return channel, nil
-}
-
 func getEditNotification(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
 	if !readOnly && metaConfigFileEnabled.Load() {
@@ -553,33 +385,4 @@ func getEditNotification(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func editNotificationChannel(tx *sql.Tx, channel NotificationChannel) error {
-	const query = `
-		update notification_channel set name = ?, details = ?
-		where id = ?
-	`
-
-	_, err := tx.Exec(query, channel.Name, channel.Details, channel.ID)
-	if err != nil {
-		return fmt.Errorf("editNotificationChannel.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func updateNotificationChannelSlug(tx *sql.Tx, old string, new string) (int, error) {
-	const query = `
-		update notification_channel set slug = ? where slug = ? returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, new, old).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("updateNotificationChannelSlug.QueryRow: %w", err)
-	}
-
-	return id, nil
 }

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"net/mail"
@@ -194,19 +192,6 @@ func getViewNotification(w http.ResponseWriter, r *http.Request) {
 	getEditNotification(w, r)
 }
 
-func deleteNotificationChannelByID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from notification_channel where id = $1
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteNotificationChannelByID.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
 	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
@@ -349,36 +334,6 @@ type MailGroup struct {
 	Description string
 }
 
-func listMailGroups(tx *sql.Tx) ([]MailGroup, error) {
-	const query = `
-		select id, slug, name, description from mail_group
-	`
-
-	mailGroups := []MailGroup{}
-
-	rows, err := tx.Query(query)
-	if err != nil {
-		return mailGroups, fmt.Errorf("listMailGroups.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		mailGroup := MailGroup{}
-		err = rows.Scan(&mailGroup.ID, &mailGroup.Slug, &mailGroup.Name, &mailGroup.Description)
-		if err != nil {
-			return mailGroups, fmt.Errorf("listMailGroups.Scan: %w", err)
-		}
-
-		mailGroups = append(mailGroups, mailGroup)
-	}
-
-	if err := rows.Err(); err != nil {
-		return mailGroups, fmt.Errorf("listMailGroups.RowsErr: %w", err)
-	}
-
-	return mailGroups, nil
-}
-
 type MailGroupIDs struct {
 	ID   int
 	Slug string
@@ -387,136 +342,6 @@ type MailGroupIDs struct {
 type MailGroupMember struct {
 	ID           int
 	EmailAddress string
-}
-
-func listMailGroupMembersByID(tx *sql.Tx, id int) ([]MailGroupMember, error) {
-	const query = `
-		select id, email_address from mail_group_member where mail_group_id = ?
-	`
-
-	members := []MailGroupMember{}
-
-	rows, err := tx.Query(query, id)
-	if err != nil {
-		return members, fmt.Errorf("listMailGroupMembersByID.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		member := MailGroupMember{}
-		err = rows.Scan(&member.ID, &member.EmailAddress)
-		if err != nil {
-			return members, fmt.Errorf("listMailGroupMembersByID.Scan: %w", err)
-		}
-
-		members = append(members, member)
-	}
-
-	if err := rows.Err(); err != nil {
-		return members, fmt.Errorf("listMailGroupMembersByID.RowsErr: %w", err)
-	}
-
-	return members, nil
-}
-
-func getMailGroupByID(tx *sql.Tx, id int) (MailGroup, error) {
-	const query = `
-		select id, name, description from mail_group where id = ?
-	`
-
-	mailGroup := MailGroup{}
-
-	err := tx.QueryRow(query, id).Scan(&mailGroup.ID, &mailGroup.Name, &mailGroup.Description)
-	if err != nil {
-		return mailGroup, fmt.Errorf("getMailGroupByID.QueryRow: %w", err)
-	}
-
-	return mailGroup, nil
-}
-
-func createMailGroup(tx *sql.Tx, slug string, name string, description string) (int, error) {
-	const query = `
-		insert into mail_group(slug, name, description) values(?, ?, ?) returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, slug, name, description).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("createMailGroup.QueryRow: %w", err)
-	}
-
-	return id, nil
-}
-
-func updateMailGroup(tx *sql.Tx, id int, name string, description string) error {
-	const query = `
-		update mail_group set name = ?, description = ? where id = ?
-	`
-
-	_, err := tx.Exec(query, name, description, id)
-	if err != nil {
-		return fmt.Errorf("updateMailGroup.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func updateMailGroupSlug(tx *sql.Tx, old string, new string) (int, error) {
-	const query = `
-		update mail_group set slug = ? where slug = ? returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, new, old).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("updateMailGroupSlug.QueryRow: %w", err)
-	}
-
-	return id, nil
-}
-
-func updateMailGroupMembers(tx *sql.Tx, id int, members []string) error {
-	const deleteQuery = `
-		delete from mail_group_member where mail_group_id = ?
-	`
-
-	_, err := tx.Exec(deleteQuery, id)
-	if err != nil {
-		return fmt.Errorf("updateMailGroupMembers.ExecDelete: %w", err)
-	}
-
-	if len(members) > 0 {
-		const baseInsertQuery = `
-			insert into mail_group_member(email_address, mail_group_id)
-			values
-		`
-
-		insertQuery := baseInsertQuery
-
-		for i := range members {
-			insertQuery += "(?, ?)"
-
-			if i != len(members)-1 {
-				insertQuery += ","
-			}
-		}
-
-		params := []any{}
-		for _, v := range members {
-			params = append(params, v, id)
-		}
-
-		insertQuery += " on conflict (mail_group_id, email_address) do nothing"
-
-		_, err := tx.Exec(insertQuery, params...)
-		if err != nil {
-			return fmt.Errorf("updateMailGroupMembers.ExecInsert: %w", err)
-		}
-	}
-
-	return nil
 }
 
 func postCreateMailGroup(w http.ResponseWriter, r *http.Request) {
@@ -585,19 +410,6 @@ func postCreateMailGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("HX-Location", "/admin/notifications")
-}
-
-func deleteMailGroupByID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from mail_group where id = ?
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteMailGroupByID.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
