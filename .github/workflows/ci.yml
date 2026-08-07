@@ -4,6 +4,9 @@ on:
   push:
 
 permissions:
+  # id-token is needed even with autorelease off: go-toolchain fetches its
+  # secrets from secret-server over OIDC on every run.
+  id-token: write
   contents: write
   actions: read
   checks: read
