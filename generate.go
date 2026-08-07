@@ -6,4 +6,4 @@ package main
 // generated files carry the standard "Code generated ... DO NOT EDIT." marker
 // so tooling treats them as the artifacts they are.
 //
-//go:generate go run github.com/sqlc-dev/sqlc/cmd/sqlc generate
+//go:generate go tool sqlc generate
