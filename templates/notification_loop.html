@@ -1,0 +1,22 @@
+The following message was posted for the alert "{{.Notification.AlertTitle}}":<br>
+								{{- .Notification.Content}}<br><br>
+							
+								{{- "Affected services"}}: {{.Notification.AlertServices}}<br>
+								{{if eq .Notification.AlertType "incident"}}
+									{{- "Severity"}}: {{.SeverityEmoji}}<br>
+								{{end}}
+								<br>
+								{{- ""}}<a href="https://{{.Domain}}">Visit status page</a>
+
+								{{if .ManagedSubscriptions}}
+									<br><br>
+									<p style="text-align:center;margin:1em 0 3em">
+										<a 
+											href="https://{{.Domain}}/unsubscribe?token={{.SubToken}}"
+											style="color:#a8aaaf;font-size:12px"
+										>
+											Unsubscribe
+										</a>
+									</p>
+								{{end}}
+							

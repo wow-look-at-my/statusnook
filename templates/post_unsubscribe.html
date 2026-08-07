@@ -1,0 +1,10 @@
+
+		{{define "title"}}You've been unsubscribed{{end}}
+		{{define "body"}}
+			<form id="content" class="unsubscribe" hx-post="/resubscribe" hx-swap="none" hx-swap-oob="true">
+				<p>You've been unsubscribed</p>
+				<input name="token" type="hidden" value="{{.Token}}">
+				<button>Resubscribe</button>
+			</form>			
+		{{end}}
+	

@@ -1,0 +1,15 @@
+
+		{{define "title"}}Subscribe{{end}}
+		{{define "body"}}
+			<script>
+				(async () => {
+					const response = await fetch(
+						window.location.href,
+						{method: "POST"}
+					);
+
+					window.location.href = response.url;
+				})();
+			</script>		
+		{{end}}
+	

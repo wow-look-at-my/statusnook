@@ -1,0 +1,36 @@
+
+		{{define "title"}}You're invited to create an admin user{{end}}
+		{{define "body"}}
+			<div class="auth-dialog-container">
+				<div class="auth-dialog">
+					<div>
+						<div>
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+								<path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" />
+					  		</svg>			
+						</div>
+						<h1>You're invited to create an admin user</h1>
+					</div>
+					<form hx-post hx-swap="none">
+						<div id="alert" class="alert"></div>
+						<label>
+							Username
+							<input name="username" required>
+						</label>
+
+						<label>
+							Password
+							<input name="password" type="password" required>
+						</label>
+					
+						<label>
+							Confirm password
+							<input name="password-confirmation" type="password" required>
+						</label>
+
+						<button>Confirm</button>
+					</form>
+				</div>
+			</div>
+		{{end}}
+	
