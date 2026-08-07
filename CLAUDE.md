@@ -20,10 +20,12 @@ embedded SQLite database.
   and fails the build until `generate:` in `.github/workflows/ci.yml` is set
   to the hash the failure prints.
 
-**CI is red on coverage, and the reason is real.** go-toolchain requires 80%;
-this fork is at 5.2%, because upstream shipped no tests at all. Do not weaken
-the gate to dodge it -- this paragraph is the visible record that it is unmet.
-The 750-line file cap and every other gate pass.
+**CI is red on coverage, and the reason is real.** go-toolchain requires 80%
+and this fork is at 69.6%. Every other gate passes. The remaining ~10% is
+`main`, the ACME and DNS domain flow, the binary self-update, the Slack OAuth
+callback and the Postmark suppression sync -- none reachable from a test
+without real services. Do not weaken the gate to dodge it; this paragraph is
+the visible record that it is unmet.
 
 ## Where things live
 
@@ -41,6 +43,14 @@ The 750-line file cap and every other gate pass.
   are DDL and dynamic identifiers sqlc cannot express.
 - `schema.sql` -- the schema a **fresh** install gets.
 - `migrations/*.sql` -- applied in filename order to an **existing** install.
+
+## Docs
+
+- `docs/configuration.md` -- the config file's fields and the rules it must
+  satisfy. It is the reference wow-look-at-my/status points its operators at.
+- `docs/testing.md` -- how the suite boots a real instance, the four seams that
+  let it reach the network paths, the three route-wide sweeps, and exactly
+  what the coverage gap is made of.
 
 ## Invariants
 
