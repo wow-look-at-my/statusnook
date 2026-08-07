@@ -101,7 +101,7 @@ func (c *faultyConn) Begin() (driver.Tx, error) {
 		return nil, err
 	}
 
-	return c.Conn.Begin()
+	return wrapTx(c.Conn.Begin())
 }
 
 func (c *faultyConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
@@ -111,10 +111,18 @@ func (c *faultyConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver
 
 	beginner, ok := c.Conn.(driver.ConnBeginTx)
 	if !ok {
-		return c.Conn.Begin()
+		return wrapTx(c.Conn.Begin())
 	}
 
-	return beginner.BeginTx(ctx, opts)
+	return wrapTx(beginner.BeginTx(ctx, opts))
+}
+
+func wrapTx(tx driver.Tx, err error) (driver.Tx, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	return &faultyTx{Tx: tx}, nil
 }
 
 type faultyStmt struct {
@@ -195,4 +203,24 @@ func withFaultyDB(app *testApp) {
 		write.Close()
 		db, rwDB = previousDB, previousRWDB
 	})
+}
+
+// Commit is a statement like any other, and nearly every handler branches on
+// it -- but database/sql hands back the driver's own Tx, so an unwrapped one
+// puts all of those branches out of the sweep's reach. Rollback deliberately
+// stays unwrapped: it runs on the way out of a handler that has already
+// failed, and failing it too would only mask the branch under test.
+type faultyTx struct {
+	driver.Tx
+}
+
+func (t *faultyTx) Commit() error {
+	if err := nextFault(); err != nil {
+		// The sqlite transaction has to go somewhere. database/sql hands the
+		// connection back to the pool the moment Commit returns, so skipping
+		// this leaves the next writer inside a transaction that never ended.
+		return errors.Join(err, t.Tx.Rollback())
+	}
+
+	return t.Tx.Commit()
 }

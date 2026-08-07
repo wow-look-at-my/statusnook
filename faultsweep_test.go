@@ -217,22 +217,6 @@ func TestPreparedRequestsSurfaceAFailureAtEveryStatement(t *testing.T) {
 		sweepFaults(t, app, http.MethodPost, path, form)
 	}
 
-	// The webhook is the one route that has to be signed to get past its gate,
-	// so it needs its own loop.
-	for depth := int64(1); depth <= 30; depth++ {
-		failAtStatement(depth)
-		resp := app.deliverSignedWebhook(`{"ref":"refs/heads/master"}`)
-		fired := faultFired()
-		failAtStatement(0)
-
-		if !fired {
-			break
-		}
-
-		require.GreaterOrEqual(t, resp.status, 400,
-			"the webhook answered %d with statement %d failed", resp.status, depth)
-	}
-
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/").status)
 }
@@ -272,4 +256,39 @@ func (a *testApp) mintInvitationToken() string {
 	require.NotEmpty(a.t, token)
 
 	return token
+}
+
+// The webhook needs its own function rather than a place in the sweep above:
+// getting past its gate means turning GitHub sync on, and that sets
+// metaConfigFileEnabled, which makes every mutating admin handler answer 400
+// before it runs a single statement.
+func TestTheWebhookSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	gh := newFakeGitHub(t)
+	app.enableGitHubSync(t)
+
+	// A one-key config on purpose. The sweep re-runs the whole request once per
+	// statement, so an apply that touches four tables would put the deep
+	// branches -- the ones after applyConfig returns -- hundreds of iterations
+	// out of reach.
+	gh.serve("general-settings:\n  name: Pushed\n", "sha-one")
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 120; depth++ {
+		failAtStatement(depth)
+		resp := app.deliverSignedWebhook(`{"ref":"refs/heads/master"}`)
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"the webhook answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
 }
