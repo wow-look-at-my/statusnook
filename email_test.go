@@ -151,3 +151,42 @@ func TestNotificationLoopMailsAnEmailSubscriber(t *testing.T) {
 	require.Eventually(t, func() bool { return len(app.unsentNotifications()) == 0 },
 		10*time.Second, 100*time.Millisecond, "sent_at was never stamped")
 }
+
+// Whatever headers the channel carries go on every message it sends -- the
+// confirmation the subscribe form mails, and the alert the queue mails.
+func TestChannelHeadersRideEveryMessage(t *testing.T) {
+	app := withTestApp(t)
+	smtp := newFakeSMTP(t)
+
+	before := app.channelIDs()
+	require.Less(t, app.post("/admin/notifications/create", url.Values{
+		"type": {"smtp"}, "display-name": {"Mail"},
+		"host": {"localhost"}, "port": {strconv.Itoa(smtp.port)},
+		"username": {"statusnook"}, "password": {"shh"},
+		"from":       {"status@example.com"},
+		"header-key": {"X-Mailer"}, "header-value": {"statusnook"},
+	}).status, 400)
+
+	channelID := onlyNewID(t, before, app.channelIDs())
+	require.Less(t, app.post("/admin/alerts/notifications", url.Values{
+		"smtp-notification-channel": {strconv.Itoa(channelID)},
+		"managed-subscriptions":     {"on"},
+	}).status, 400)
+
+	require.Less(t, app.post("/subscribe/email",
+		url.Values{"email": {"sub@example.com"}}).status, 400)
+
+	require.Eventually(t, func() bool { return len(smtp.messages()) > 0 },
+		10*time.Second, 20*time.Millisecond, "no confirmation email was sent")
+	require.Contains(t, smtp.messages()[0].body, "X-Mailer: statusnook")
+
+	app.addPendingSubscription("live@example.com", "tok")
+	require.Equal(t, http.StatusFound, app.post("/subscribe/email/confirm?token=tok", nil).status)
+
+	app.createAlert("Outage", app.createService("Web", "the site"), "we are looking")
+	drainNotificationQueue()
+
+	require.Eventually(t, func() bool { return len(smtp.messages()) > 1 },
+		10*time.Second, 20*time.Millisecond, "the alert was never mailed")
+	require.Contains(t, smtp.messages()[len(smtp.messages())-1].body, "X-Mailer: statusnook")
+}

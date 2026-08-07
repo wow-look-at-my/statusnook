@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -159,4 +160,42 @@ func (a *testApp) monitorLogs(id int) []MonitorLog {
 	require.NoError(a.t, err)
 
 	return logs
+}
+
+// A target that refuses the connection is an error result, which is a different
+// branch from a response with a status code -- and a POST monitor sends a body,
+// which nothing else in the suite makes the loop do.
+func TestMonitorCheckRecordsAConnectionRefusalAndSendsABody(t *testing.T) {
+	app := withTestApp(t)
+
+	var received atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		if string(body) == `{"ping":1}` {
+			received.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	refused := app.createMonitor("Gone", "http://127.0.0.1:1")
+
+	before := app.monitorIDs()
+	require.Less(t, app.post("/admin/monitors/create", url.Values{
+		"name": {"Ingest"}, "url": {target.URL}, "method": {"POST"},
+		"frequency": {"60"}, "timeout": {"5"}, "attempts": {"1"},
+		"format": {"json"}, "body": {`{"ping":1}`},
+		"header-key": {"X-Trace"}, "header-value": {"on"},
+	}).status, 400)
+	posting := onlyNewID(t, before, app.monitorIDs())
+
+	wg := sync.WaitGroup{}
+	newMonitorScheduler(&wg).checkDueMonitors(context.Background())
+	wg.Wait()
+
+	require.Positive(t, received.Load(), "the monitor's body never reached the target")
+	require.Equal(t, "error", app.monitorLogs(refused)[0].Result,
+		"a refused connection is an error, not a response")
+	require.Equal(t, "success", app.monitorLogs(posting)[0].Result)
 }

@@ -122,3 +122,26 @@ func TestConfigSettingsChecksTheRepositoryAndPath(t *testing.T) {
 	require.Empty(t, app.metaValue("githubConfigSHA"))
 	require.Equal(t, "false", app.metaValue("githubManagedConfig"))
 }
+
+// The form checks the repository and the config path by calling GitHub, so
+// GitHub being unreachable has to stop the save rather than store settings
+// nothing has verified.
+func TestConfigSettingsFailsWhenGitHubIsUnreachable(t *testing.T) {
+	app := withTestApp(t)
+
+	previous := githubAPIBaseURL
+	githubAPIBaseURL = "http://127.0.0.1:1"
+	t.Cleanup(func() { githubAPIBaseURL = previous })
+
+	resp := app.post("/admin/settings/config-settings", url.Values{
+		"config-file":           {"on"},
+		"github-managed":        {"on"},
+		"github-repo-url":       {"https://github.com/example/status"},
+		"github-branch":         {"master"},
+		"github-config-path":    {"config.yaml"},
+		"github-token":          {"ghtoken"},
+		"github-webhook-secret": {"hooksecret"},
+	})
+	require.GreaterOrEqual(t, resp.status, 400, resp.body)
+	require.Empty(t, app.metaValue("githubRepoURL"))
+}

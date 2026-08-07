@@ -10,22 +10,24 @@ embedded SQLite database.
 - Offline config check: `./statusnook -validate-config path/to/config.yaml`.
 - Regenerate SQL: `go generate ./...` (sqlc is a `tool` dependency, so this
   needs nothing on `PATH` beyond Go).
-- CI is `wow-look-at-my/go-toolchain@v1` with `cgo: true`, `autorelease: false`
-  and the `generate:` approval hash. It publishes nothing; whatever runs an
-  instance is built and deployed separately, and the config that drives one
-  lives in wow-look-at-my/status as plain YAML any statusnook reads.
+- CI is `wow-look-at-my/go-toolchain@v1` with `cgo: true`, `autorelease: false`,
+  `targets: linux/amd64` and the `generate:` approval hash. It publishes
+  nothing; whatever runs an instance is built and deployed separately, and the
+  config that drives one lives in wow-look-at-my/status as plain YAML any
+  statusnook reads.
+- `targets: linux/amd64` is not tidying. cgo cross-compilation needs a C
+  toolchain per target, so every non-native pair fails to link sqlite3, and
+  `postUpdate` restarts the process with `syscall.Kill`, which Windows does not
+  have. Widening it means a pure-Go driver and a portable restart first.
 - `id-token: write` is required even with autorelease off -- go-toolchain
   fetches secrets from secret-server over OIDC on every run.
 - Editing the `//go:generate` line in `generate.go` changes its approval hash
   and fails the build until `generate:` in `.github/workflows/ci.yml` is set
   to the hash the failure prints.
-
-**CI is red on coverage, and the reason is real.** go-toolchain requires 80%
-and this fork is at 72.3%. Every other gate passes. `main`, the ACME and DNS
-domain flow and the binary self-update account for 7.7% on their own and no
-test in this process can reach them; the rest is handler code that simply has
-no test yet. `docs/testing.md` has the breakdown. Do not weaken the gate to
-dodge it; this paragraph is the visible record that it is unmet.
+- go-toolchain requires 80% coverage and the suite clears it with very little
+  to spare. `main`, the ACME and DNS domain flow and the binary self-update are
+  7.7% on their own and no test in this process reaches them, so a handler that
+  loses its tests takes CI red. `docs/testing.md` has the breakdown.
 
 ## Where things live
 

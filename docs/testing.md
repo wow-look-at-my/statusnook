@@ -55,7 +55,7 @@ Three tests replay every route rather than asserting one case:
 
 ## What is not covered, and why
 
-Coverage is 72.3%; go-toolchain requires 80%. 1,861 of 6,726 statements are
+Coverage is 80.4%; go-toolchain requires 80%. 1,314 of 6,726 statements are
 uncovered, and they are two different problems.
 
 The first needs something this process cannot have:
@@ -63,12 +63,11 @@ The first needs something this process cannot have:
 | Uncovered | Statements | Needs |
 |---|---|---|
 | `main` | 104 | listeners, TLS, signal handling, shutdown |
-| `postSettings`' domain branch, `postSetupDomain`, `lookupDomain`, `randomNS`, `monitorUnconfirmedDomainLoop`, `attemptCertificateAcquisition` | 333 | DNS answers from the root servers down and a live ACME server |
-| `postUpdate` | 73 | downloading a release binary over the running one and restarting into it |
+| `postSettings`' TLS branch, `postSetupDomain`, `lookupDomain`, `randomNS`, `monitorUnconfirmedDomainLoop`, `attemptCertificateAcquisition` | 297 | DNS answers from the root servers down and a live ACME server |
+| `postUpdate` | 67 | downloading a release binary over the running one and restarting into it |
 | `retentionLoop` | 8 | a ticker that only fires once a day |
 
-518 statements, 7.7% of the module. Everything else -- `configWebhook`,
-`postConfigSettings`, `postEditMonitor`, `getSettings` and a long tail of
-handler branches -- is reachable and simply has no test yet. Reaching 80%
-means closing nearly all of that second pile, since the first one alone is
-most of the 20% the gate allows.
+476 statements, 7.1% of the module -- most of the 20% the gate allows, before
+a single handler branch. The rest is an even spread of a few statements per
+handler, so the margin over the gate is thin: a handler that loses its tests
+takes CI red, and the way back is another sweep, not a lowered gate.

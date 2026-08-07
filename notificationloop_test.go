@@ -145,3 +145,21 @@ func (a *testApp) unsentNotifications() []UnsentAlertNotification {
 
 	return unsent
 }
+
+// A subscriber whose webhook is gone is a failed pass, not a delivery: the
+// notification stays unsent so the next tick tries again.
+func TestNotificationLoopLeavesAFailedSlackDeliveryUnsent(t *testing.T) {
+	app := withTestApp(t)
+	app.useSMTPChannelForAlerts()
+
+	serviceID := app.createService("Web", "the site")
+	app.subscribeSlack("http://127.0.0.1:1")
+	app.createAlert("Outage", serviceID, "we are looking")
+
+	require.NotEmpty(t, app.unsentNotifications())
+
+	drainNotificationQueue()
+
+	require.NotEmpty(t, app.unsentNotifications(),
+		"a delivery that never landed must not be stamped as sent")
+}

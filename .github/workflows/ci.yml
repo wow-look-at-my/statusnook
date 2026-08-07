@@ -24,6 +24,12 @@ jobs:
         with:
           cgo: true
           autorelease: false
+          # linux/amd64 only, and both halves of that are load-bearing. cgo
+          # cross-compilation needs a C toolchain per target, which the runner
+          # does not have, so every non-native pair fails to link sqlite3. And
+          # postUpdate restarts the process with syscall.Kill, which does not
+          # exist on Windows. The deployment is a linux/amd64 container.
+          targets: linux/amd64
           # Approves generate.go's sqlc directive. go-toolchain pins the exact
           # command text by hash, so editing the directive fails the build until
           # this is updated to the hash it prints.
