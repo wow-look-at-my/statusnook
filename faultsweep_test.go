@@ -414,29 +414,13 @@ func TestConfigSettingsSurfacesAFailureAtEveryStatement(t *testing.T) {
 	sweepFaults(t, app, http.MethodGet, "/admin/settings/config-settings", nil)
 }
 
-// Polls until the armed fault is reached, or gives up. The loops below run on
-// their own schedule, so unlike a request there is nothing to return from.
-func waitForFault(d time.Duration) bool {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if faultFired() {
-			return true
-		}
-
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	return false
-}
-
-// The notification loop does its work inside a closure per tick, so a failed
-// statement ends that tick and the next one starts the batch over. What is
-// under test is that no failure takes the goroutine down with it -- there is no
-// status code here, and a panicking loop would stop the queue draining for as
-// long as the process runs.
+// A failed statement abandons the rest of the pass, and the next tick starts
+// the batch over. There is no status code to check -- what is under test is
+// that no failure takes the loop's goroutine down with it, which is why the
+// pass is driven directly rather than through the ticker: a timed sweep covers
+// whatever it happens to reach in the window, and that is not a gate.
 func TestNotificationLoopSurvivesAFailureAtEveryStatement(t *testing.T) {
 	app := withTestApp(t)
-	withFastNotificationLoop(t)
 	app.useSMTPChannelForAlerts()
 
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -450,21 +434,10 @@ func TestNotificationLoopSurvivesAFailureAtEveryStatement(t *testing.T) {
 
 	withFaultyDB(app)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go notificationLoop(ctx, &wg)
-	defer func() {
-		cancel()
-		wg.Wait()
-	}()
-
-	// The counter runs across ticks rather than resetting per tick, so a depth
-	// past the length of one tick simply lands in a later one. Walking far
-	// enough covers every position within a tick.
 	for depth := int64(1); depth <= 40; depth++ {
 		failAtStatement(depth)
-		fired := waitForFault(1500 * time.Millisecond)
+		drainNotificationQueue()
+		fired := faultFired()
 		failAtStatement(0)
 
 		if !fired {
@@ -509,4 +482,50 @@ func TestConfirmingASubscriptionSurfacesAFailureAtEveryStatement(t *testing.T) {
 
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// A fresh scheduler per depth is what makes this repeatable: it carries no
+// last-checked stamps, so the monitor is due again every pass. Nothing here
+// answers with a status code -- the property is that a failed statement ends
+// the check rather than the process, and leaves the pool usable.
+func TestMonitorChecksSurviveAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+
+	// Answering 500 puts the monitor down on its first check, which is the
+	// pass that also loads the channels and mail groups to tell.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	channelID := strconv.Itoa(app.createSlackChannel("Chat", target.URL))
+	groupID := strconv.Itoa(app.createMailGroup("Ops", "ops@example.com"))
+	monitorID := strconv.Itoa(app.createMonitor("API", target.URL))
+
+	require.Less(t, app.post("/admin/monitors/"+monitorID+"/edit", url.Values{
+		"name": {"API"}, "url": {target.URL}, "method": {"GET"},
+		"frequency": {"60"}, "timeout": {"5"}, "attempts": {"1"},
+		"notification-channels": {channelID}, "mail-groups": {groupID},
+	}).status, 400)
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 40; depth++ {
+		wg := sync.WaitGroup{}
+		scheduler := newMonitorScheduler(&wg)
+
+		failAtStatement(depth)
+		scheduler.checkDueMonitors(context.Background())
+		wg.Wait()
+
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/admin/monitors").status)
 }

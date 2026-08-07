@@ -201,3 +201,39 @@ func TestHistoryPagesByMonth(t *testing.T) {
 		require.Equal(t, "/history", resp.header.Get("Location"))
 	}
 }
+
+// Editing an alert and choosing which channel carries alert email are the two
+// alert-settings writes the shared sweep does not reach with a form that gets
+// past validation.
+func TestAlertWritesSurfaceAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+
+	serviceID := strconv.Itoa(app.createService("Web", "the site"))
+	channelID := strconv.Itoa(app.createSMTPChannel("Mail"))
+	alertID := strconv.Itoa(app.createAlert("Outage", app.createService("Api", "the api"), "up"))
+
+	// A maintenance window carries no severity, and only an SMTP channel can
+	// carry alert email -- a slack one would be asked to send a message it has
+	// no address for.
+	slackID := strconv.Itoa(app.createSlackChannel("Chat", "https://hooks.example.com/x"))
+	require.Equal(t, http.StatusBadRequest, app.post("/admin/alerts/notifications",
+		url.Values{"smtp-notification-channel": {slackID}}).status)
+
+	withFaultyDB(app)
+
+	for path, form := range map[string]url.Values{
+		"/admin/alerts/notifications": {
+			"smtp-notification-channel": {channelID},
+			"managed-subscriptions":     {"on"},
+		},
+		"/admin/alerts/" + alertID + "/edit": {
+			"title": {"Partial outage"}, "services": {serviceID},
+			"type": {"maintenance"},
+		},
+	} {
+		sweepFaults(t, app, http.MethodPost, path, form)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/admin/alerts").status)
+}
