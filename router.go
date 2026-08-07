@@ -269,9 +269,13 @@ func newRouter() *chi.Mux {
 	r.Route("/setup", func(r chi.Router) {
 		r.Use(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Every failure below writes a status. Returning bare sent a 200
+				// with an empty body, so a database fault mid-setup rendered as a
+				// blank page and the wizard looked like it had simply stopped.
 				tx, err := db.Begin()
 				if err != nil {
 					log.Printf("Setup.Begin: %s", err)
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 				defer tx.Rollback()
@@ -279,12 +283,14 @@ func newRouter() *chi.Mux {
 				v, err := getMetaValue(tx, "setup")
 				if err != nil {
 					log.Printf("Setup.getMetaValue: %s", err)
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 
 				err = tx.Commit()
 				if err != nil {
 					log.Printf("Setup.Commit: %s", err)
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 
@@ -312,7 +318,8 @@ func newRouter() *chi.Mux {
 
 				url, ok := endpoints[v]
 				if !ok {
-					log.Printf("Setup.endpoints: no endpoint")
+					log.Printf("Setup.endpoints: no endpoint for setup state %q", v)
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 

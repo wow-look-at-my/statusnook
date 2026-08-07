@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -152,4 +154,122 @@ func TestHandlersSurfaceAFailureAtEveryStatement(t *testing.T) {
 	// left a transaction open on the single writer connection.
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/admin/alerts").status)
+}
+
+// The routes that need something set up first: a pending subscription to
+// confirm, an invitation to redeem, a cursor to page from, a signed webhook.
+func TestPreparedRequestsSurfaceAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	gh := newFakeGitHub(t)
+	app.useSMTPChannelForAlerts()
+
+	monitorID := strconv.Itoa(app.createMonitor("API", "https://example.com/health"))
+	channelID := strconv.Itoa(app.createSlackChannel("Chat", "https://hooks.example.com/x"))
+	groupID := strconv.Itoa(app.createMailGroup("Ops", "ops@example.com"))
+
+	logged := app.createMonitor("Logged", "https://example.com/x")
+	logIDs := app.seedMonitorLogs(logged, time.Now().UTC().Truncate(24*time.Hour), 2)
+	loggedID := strconv.Itoa(logged)
+	date := time.Now().UTC().Format("2006-01-02")
+
+	app.addPendingSubscription("sub@example.com", "tok")
+	invitation := app.mintInvitationToken()
+	crossAuth := strings.TrimSpace(app.post("/admin/resolve", nil).body)
+
+	gh.serve(fullConfig, "sha-one")
+
+	withFaultyDB(app)
+
+	for _, path := range []string{
+		"/login",
+		"/cross-auth?token=" + crossAuth,
+		"/invitation/" + invitation,
+		"/admin/monitors/" + loggedID + "/all?after=" + strconv.Itoa(logIDs[1]) + "&date=" + date,
+		"/admin/monitors/" + loggedID + "/poll?before=" + strconv.Itoa(logIDs[0]) + "&date=" + date,
+		"/admin/monitors/" + monitorID + "/view",
+		"/admin/notifications/" + channelID + "/view",
+		"/admin/notifications/mail-groups/" + groupID + "/view",
+	} {
+		sweepFaults(t, app, http.MethodGet, path, nil)
+	}
+
+	for path, form := range map[string]url.Values{
+		"/login":                             {"username": {"admin"}, "password": {"hunter2hunter2"}},
+		"/logout":                            {},
+		"/subscribe/email/confirm?token=tok": {},
+		"/invitation/" + invitation: {
+			"username": {"invited"}, "password": {"hunter2hunter2"},
+			"password-confirmation": {"hunter2hunter2"},
+		},
+		"/admin/monitors/" + monitorID + "/edit": {
+			"name": {"API"}, "url": {"https://example.com/health"}, "method": {"GET"},
+			"frequency": {"60"}, "timeout": {"5"}, "attempts": {"2"},
+		},
+		"/admin/notifications/" + channelID + "/edit": {
+			"display-name": {"Chat"}, "webhook-url": {"https://hooks.example.com/x"},
+		},
+		"/admin/notifications/mail-groups/" + groupID + "/edit": {
+			"name": {"Ops"}, "members": {"ops@example.com"},
+		},
+		"/admin/alerts/notifications":                             {"managed-subscriptions": {"on"}},
+		"/admin/settings/config-settings/generate-webhook-secret": {},
+	} {
+		sweepFaults(t, app, http.MethodPost, path, form)
+	}
+
+	// The webhook is the one route that has to be signed to get past its gate,
+	// so it needs its own loop.
+	for depth := int64(1); depth <= 30; depth++ {
+		failAtStatement(depth)
+		resp := app.deliverSignedWebhook(`{"ref":"refs/heads/master"}`)
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"the webhook answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// The first-boot wizard writes as it goes, so a failure partway has to stop the
+// instance advancing rather than leaving it half set up.
+func TestSetupSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := newTestApp(t)
+	withFaultyDB(app)
+
+	// Each sweep ends with the request that finally ran clean, which is what
+	// advances the wizard to the step the next one needs.
+	sweepFaults(t, app, http.MethodGet, "/setup/domain", nil)
+	sweepFaults(t, app, http.MethodPost, "/setup/skip-domain",
+		url.Values{"domain": {"status.example.com"}})
+	require.Equal(t, "account", metaSetup.Load())
+
+	sweepFaults(t, app, http.MethodGet, "/setup/account", nil)
+	sweepFaults(t, app, http.MethodPost, "/setup/account", url.Values{
+		"username": {"admin"}, "password": {"hunter2hunter2"},
+		"password-confirmation": {"hunter2hunter2"},
+	})
+	require.Equal(t, "name", metaSetup.Load())
+
+	sweepFaults(t, app, http.MethodGet, "/setup/name", nil)
+	sweepFaults(t, app, http.MethodPost, "/setup/name", url.Values{"name": {"Test Status"}})
+	require.Equal(t, "done", metaSetup.Load())
+}
+
+func (a *testApp) mintInvitationToken() string {
+	a.t.Helper()
+
+	resp := a.post("/admin/settings/users/invite", nil)
+	require.Less(a.t, resp.status, 400, resp.body)
+
+	token := a.invitationToken()
+	require.NotEmpty(a.t, token)
+
+	return token
 }
