@@ -4,29 +4,20 @@ on:
   push:
 
 permissions:
-  contents: read
-  packages: write
+  contents: write
   actions: read
+  checks: read
 
 jobs:
-  image:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: wow-look-at-my/actions@typescript#latest
-        id: meta
+      # cgo because mattn/go-sqlite3 does not compile without it.
+      # autorelease off: nothing here is published. The binary is the app; the
+      # config that drives an instance lives in wow-look-at-my/status and is
+      # read by whatever statusnook is running.
+      - uses: wow-look-at-my/go-toolchain@v1
         with:
-          script: |
-            const image = `ghcr.io/${github.repository.toLowerCase()}:latest`;
-            core.setOutput('image', image);
-            core.setOutput('push', String(github.ref === 'refs/heads/main'));
-
-      # Builds on every branch so a broken Dockerfile or a compile error fails
-      # before merge; only main pushes, because :latest is a single mutable tag
-      # that the deployed stack pulls.
-      - uses: wow-look-at-my/actions@ghcr#latest
-        with:
-          token: ${{ github.token }}
-          push_image: ${{ steps.meta.outputs.image }}
-          push: ${{ steps.meta.outputs.push }}
+          cgo: true
+          autorelease: false
