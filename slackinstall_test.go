@@ -165,3 +165,39 @@ func TestSlackCallbackNeedsTheAppConfigured(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, app.get("/callback/slack?code=x").status)
 }
+
+// The callback creates the subscription in one transaction, replacing whatever
+// the same team and channel had before, so a failure partway must not leave the
+// old one deleted and no new one in its place.
+func TestSlackCallbackSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	app.configureSlackApp()
+
+	serveSlackAccess(t, http.StatusOK, map[string]any{
+		"ok":   true,
+		"team": map[string]string{"id": "T123"},
+		"incoming_webhook": map[string]string{
+			"url":        "https://hooks.slack.example.com/T123/C456",
+			"channel_id": "C456",
+		},
+	})
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 30; depth++ {
+		failAtStatement(depth)
+		resp := app.get("/callback/slack?code=oauthcode")
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"the callback answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusFound, app.get("/callback/slack?code=oauthcode").status)
+}

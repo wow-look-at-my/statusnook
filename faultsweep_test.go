@@ -475,3 +475,38 @@ func TestNotificationLoopSurvivesAFailureAtEveryStatement(t *testing.T) {
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/").status)
 }
+
+// A confirmation token is retired the first time it works, so the shared sweep
+// stops at whichever depth first got through. A fresh pending subscription per
+// depth walks the whole handler instead.
+func TestConfirmingASubscriptionSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	smtp := newFakeSMTP(t)
+	app.useFakeSMTPForAlerts(smtp, true)
+
+	tokens := make([]string, 0, 40)
+	for i := range cap(tokens) {
+		token := fmt.Sprintf("tok-%d", i)
+		app.addPendingSubscription(fmt.Sprintf("c%d@example.com", i), token)
+		tokens = append(tokens, token)
+	}
+
+	withFaultyDB(app)
+
+	for depth, token := range tokens {
+		failAtStatement(int64(depth) + 1)
+		resp := app.post("/subscribe/email/confirm?token="+token, nil)
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"confirm answered %d with statement %d failed", resp.status, depth+1)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
+}

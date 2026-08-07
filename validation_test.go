@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -408,4 +409,63 @@ func (a *testApp) smtpDetails(id string) SMTPNotificationDetails {
 	require.True(a.t, ok)
 
 	return details
+}
+
+// The shared sweep creates a slack channel, so the SMTP half of the create
+// handler -- a different transaction with a duplicate-name check of its own --
+// is only reached from here.
+func TestCreatingAnSMTPChannelSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+
+	form := func(name string) url.Values {
+		return url.Values{
+			"type": {"smtp"}, "display-name": {name},
+			"host": {"smtp.example.com"}, "port": {"587"},
+			"username": {"statusnook"}, "password": {"shh"},
+			"from": {"status@example.com"},
+		}
+	}
+
+	// Display names may repeat; the slug is what has to stay unique, and it is
+	// derived against the ones already taken.
+	require.Less(t, app.post("/admin/notifications/create", form("Mail")).status, 400)
+	require.Less(t, app.post("/admin/notifications/create", form("Mail")).status, 400)
+
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	channels, err := listNotificationChannels(tx, listNotificationsOptions{})
+	require.NoError(t, err)
+
+	slugs := map[string]bool{}
+	for _, channel := range channels {
+		require.False(t, slugs[channel.Slug], "two channels share the slug %q", channel.Slug)
+		slugs[channel.Slug] = true
+	}
+	require.Len(t, channels, 2)
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 30; depth++ {
+		failAtStatement(depth)
+		resp := app.post("/admin/notifications/create", form(fmt.Sprintf("Mail %d", depth)))
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"create answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+
+	// And the whole form is refused while a config file owns the instance.
+	metaConfigFileEnabled.Store(true)
+	t.Cleanup(func() { metaConfigFileEnabled.Store(false) })
+	require.Equal(t, http.StatusBadRequest,
+		app.post("/admin/notifications/create", form("Later")).status)
 }
