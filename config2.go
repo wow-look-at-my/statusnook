@@ -38,8 +38,12 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	// No row at all means the settings page never turned GitHub sync on, which
+	// is the same answer as having turned it off -- and this is a public route,
+	// so an instance that never configured it answered every delivery with a
+	// 500 and a log line.
 	githubManagedConfig, err := getMetaValue(tx, "githubManagedConfig")
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Printf("configWebhook.getMetaValueGitHubManagedConfig: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -144,7 +148,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.github.com/repos/"+path.Join(repoPath, "contents", configPath)+"?ref="+branch,
+		githubAPIBaseURL+"/repos/"+path.Join(repoPath, "contents", configPath)+"?ref="+branch,
 		nil,
 	)
 	if err != nil {

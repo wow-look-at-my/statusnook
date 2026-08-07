@@ -411,7 +411,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 
 		req, err := http.NewRequest(
 			http.MethodGet,
-			"https://api.github.com/repos/"+repoPath,
+			githubAPIBaseURL+"/repos/"+repoPath,
 			nil,
 		)
 		if err != nil {
@@ -471,7 +471,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 
 		req, err = http.NewRequest(
 			http.MethodGet,
-			"https://api.github.com/repos/"+path.Join(repoPath, "contents", githubConfigPath)+"?ref="+
+			githubAPIBaseURL+"/repos/"+path.Join(repoPath, "contents", githubConfigPath)+"?ref="+
 				githubBranch,
 			nil,
 		)

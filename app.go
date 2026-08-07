@@ -32,6 +32,11 @@ var appWg sync.WaitGroup
 var appCtx context.Context
 var cancelAppCtx context.CancelFunc
 
+// One place for the host every GitHub call goes to -- the config webhook, the
+// repo and config-path checks on the settings page, and the update check. A
+// variable rather than a constant so a test can point them at a local server.
+var githubAPIBaseURL = "https://api.github.com"
+
 type statusCtxKey struct{}
 
 func statusMiddleware(h http.Handler) http.Handler {

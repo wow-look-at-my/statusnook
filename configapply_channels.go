@@ -61,6 +61,11 @@ func applyConfigNotificationChannels(tx *sql.Tx, cfg StatusnookConfig, msgs []st
 
 		if cType != "smtp" && cType != "slack" {
 			msgs = append(msgs, "notification-channels."+slug+": type must be one of smtp, slack")
+			// The column has a check constraint on exactly these two, so
+			// carrying on would abort applyConfig with a database error instead
+			// of returning the message above -- and the settings page and the
+			// GitHub webhook both report only the messages.
+			continue
 		}
 
 		nameAny, ok := v["name"]

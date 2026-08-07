@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"net/http"
 	"net/url"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -442,4 +444,88 @@ func (a *testApp) alert(id int) AlertDetail {
 	require.NoError(a.t, err)
 
 	return alert
+}
+
+// The timeline's per-message edit and delete endpoints, which nothing else in
+// the suite reaches.
+func TestAlertMessageEditAndDelete(t *testing.T) {
+	app := withTestApp(t)
+
+	serviceID := app.createService("Web", "the site")
+	alertID := app.createAlert("Outage", serviceID, "we are looking")
+
+	detail := app.alert(alertID)
+	require.Len(t, detail.Messages, 1)
+	messageID := detail.Messages[0].ID
+
+	path := "/admin/alerts/" + strconv.Itoa(alertID) + "/messages/" + strconv.Itoa(messageID)
+
+	require.Equal(t, http.StatusOK, app.get(path).status)
+
+	resp := app.post(path, url.Values{"message": {"root cause found"}})
+	require.Less(t, resp.status, 400, resp.body)
+
+	detail = app.alert(alertID)
+	require.Equal(t, "root cause found", detail.Messages[0].Content)
+	require.NotNil(t, detail.Messages[0].LastUpdatedAt)
+
+	// An empty message is a 400, not an accidental blank timeline entry.
+	require.Equal(t, http.StatusBadRequest, app.post(path, url.Values{"message": {""}}).status)
+
+	resp = app.delete(path)
+	require.Less(t, resp.status, 400, resp.body)
+	require.Empty(t, app.alert(alertID).Messages)
+}
+
+// The two log endpoints the monitor page polls. Both take a cursor and a date
+// and both must reject a request missing either.
+func TestMonitorLogEndpointsPageAndValidate(t *testing.T) {
+	app := withTestApp(t)
+
+	id := app.createMonitor("API", "https://example.com/health")
+
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	logIDs := app.seedMonitorLogs(id, day, 3)
+
+	base := "/admin/monitors/" + strconv.Itoa(id)
+	date := day.Format("2006-01-02")
+
+	resp := app.get(base + "/all?after=" + strconv.Itoa(logIDs[2]) + "&date=" + date)
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+
+	resp = app.get(base + "/poll?before=" + strconv.Itoa(logIDs[0]) + "&date=" + date)
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+
+	for _, path := range []string{
+		base + "/all",
+		base + "/all?after=1",
+		base + "/all?after=notanumber&date=" + date,
+		base + "/all?date=" + date,
+		base + "/poll",
+		base + "/poll?before=1",
+		base + "/poll?before=notanumber&date=" + date,
+		base + "/poll?date=" + date,
+		base + "/poll?before=1&date=not-a-date",
+	} {
+		require.Equal(t, http.StatusBadRequest, app.get(path).status, "GET %s", path)
+	}
+}
+
+func (a *testApp) seedMonitorLogs(monitorID int, day time.Time, count int) []int {
+	a.t.Helper()
+
+	tx, err := rwDB.Begin()
+	require.NoError(a.t, err)
+	defer tx.Rollback()
+
+	ids := []int{}
+	for i := range count {
+		at := day.Add(time.Duration(i) * time.Minute)
+		id, err := createMonitorLog(tx, at, at, 200, sql.NullString{}, 1, "success", monitorID)
+		require.NoError(a.t, err)
+		ids = append(ids, id)
+	}
+	require.NoError(a.t, tx.Commit())
+
+	return ids
 }

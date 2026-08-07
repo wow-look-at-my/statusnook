@@ -26,7 +26,7 @@ func updateCheck(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.github.com/repos/goksan/statusnook/releases/latest", nil,
+		githubAPIBaseURL+"/repos/goksan/statusnook/releases/latest", nil,
 	)
 	if err != nil {
 		log.Printf("updateCheck.NewRequest: %s", err)
@@ -147,7 +147,7 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 
 	req, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.github.com/repos/goksan/statusnook/releases/latest",
+		githubAPIBaseURL+"/repos/goksan/statusnook/releases/latest",
 		nil,
 	)
 	if err != nil {
