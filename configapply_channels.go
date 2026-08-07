@@ -7,6 +7,7 @@ import (
 	"net/mail"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 func applyConfigNotificationChannels(tx *sql.Tx, cfg StatusnookConfig, msgs []string) ([]string, error) {
@@ -282,6 +283,21 @@ func applyConfigNotificationChannels(tx *sql.Tx, cfg StatusnookConfig, msgs []st
 						"notification-channels."+slug+": invalid misc value "+k+
 							", must be string or number",
 					)
+				}
+			}
+
+			// Same rule the admin form enforces. Postmark routes on the
+			// message stream, and the senders inject one unconditionally for
+			// this host, so an absent stream means every alert leaves with an
+			// empty X-PM-Message-Stream and is refused at delivery time.
+			if strings.EqualFold(host, "smtp.postmarkapp.com") {
+				if misc["pm-transactional"] == "" {
+					msgs = append(msgs, "notification-channels."+slug+
+						": misc.pm-transactional is required for smtp.postmarkapp.com")
+				}
+				if misc["pm-broadcast"] == "" {
+					msgs = append(msgs, "notification-channels."+slug+
+						": misc.pm-broadcast is required for smtp.postmarkapp.com")
 				}
 			}
 

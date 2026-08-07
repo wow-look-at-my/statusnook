@@ -368,14 +368,11 @@ func history(w http.ResponseWriter, r *http.Request) {
 		periodParam = time.Now().UTC().Format("2006-01")
 	}
 
-	if len(periodParam) != 7 {
-		http.Redirect(w, r, "/history", http.StatusFound)
-		return
-	}
-
+	// Both spellings of a bad period land in the same place. A 500 was the
+	// answer to "2020-13", which is a link someone typed, not a fault.
 	periodDate, err := time.Parse("2006-01", periodParam)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+	if len(periodParam) != 7 || err != nil {
+		http.Redirect(w, r, "/history", http.StatusFound)
 		return
 	}
 
