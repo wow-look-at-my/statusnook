@@ -62,6 +62,13 @@ func newTestApp(t *testing.T) *testApp {
 
 	metaConfigFileEnabled.Store(false)
 
+	// The login throttle is a package-level map keyed by client IP, and every
+	// test here shares 127.0.0.1. Without this, a test that spends the ten
+	// attempts locks every test that runs after it out of logging in.
+	loginLimiterMu.Lock()
+	clear(loginLimiter)
+	loginLimiterMu.Unlock()
+
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
 
