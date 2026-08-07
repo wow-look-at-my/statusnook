@@ -8,15 +8,20 @@ templates as Go string constants, SQL, and the background loops.
 
 - Build: `go build .` -- CGO is required (`mattn/go-sqlite3`).
 - Offline config check: `./statusnook -validate-config path/to/config.yaml`.
-- CI (`.github/workflows/ci.yml`) builds the container image on every branch
-  and pushes `ghcr.io/wow-look-at-my/statusnook:latest` from `main`.
+- CI is `wow-look-at-my/go-toolchain@v1` with `cgo: true`. It publishes
+  nothing: `autorelease: false`, and no container image is built. Whatever
+  runs an instance is built and deployed separately; the config that drives
+  one lives in wow-look-at-my/status and is plain YAML any statusnook reads.
+- `id-token: write` is required even with autorelease off -- go-toolchain
+  fetches secrets from secret-server over OIDC on every run.
 
-**CI is not go-toolchain**, which the org otherwise requires for Go repos: it
-caps files at 750 lines and requires 80% coverage, and this fork carries a
-19,800-line `main.go` with no test suite upstream. Splitting the file is a real
-piece of work and nobody should silently weaken the gate to dodge it -- so the
-image build is the gate here, and this paragraph is the visible record that
-the usual one is not met. `go vet ./...` and `go test ./...` both pass.
+**CI is red, and the two reasons are real.** go-toolchain caps files at 750
+lines and requires 80% coverage; neither is configurable. This fork carries a
+19,869-line `main.go` and 4.2% coverage. Getting to green means splitting the
+file -- 5,380 of those lines are 134 embedded HTML templates, and
+`applyConfig` (953) and `getEditMonitor` (814) each exceed the cap on their
+own -- and then building a test suite upstream never had. Do not weaken the
+gate to dodge it. `go build`, `go vet ./...` and `go test ./...` all pass.
 
 ## Where things live
 
