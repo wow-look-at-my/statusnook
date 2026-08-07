@@ -1,0 +1,579 @@
+
+			{{define "title"}}Create monitor{{end}}
+			{{define "body"}}
+				<div class="create-monitor-container">
+					<div class="admin-nav-header">
+						<div>
+							<a href="/admin/monitors" hx-boost="true">
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+									<path fill-rule="evenodd" d="M11.78 5.22a.75.75 0 0 1 0 1.06L8.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd" />
+								</svg>								
+							 </a>
+					  
+							<h2>Create monitor</h2>
+						</div>
+					</div>
+	
+					<form hx-post hx-swap="none" autocomplete="off">
+						<label>
+							Name
+							<input name="name" placeholder="My website" required>
+						</label>
+	
+						<label>
+							URL
+							<span id="alert-error"></span>
+							<input
+								name="url"
+								type="url"
+								placeholder="https://example.com"
+								required
+							>
+						</label>
+						
+						<div>
+							<div>
+								<label>
+									HTTP method
+								</label>
+								<div class="checkbox-group">
+									<label>
+										<input
+											name="method"
+											type="radio"
+											value="GET"
+											onclick="handleMethodChange(this);"
+											checked
+											required
+										/>
+										GET
+									</label>
+									<label>
+										<input
+											name="method"
+											type="radio"
+											value="POST"
+											onclick="handleMethodChange(this);"
+											required
+										/>
+										POST
+									</label>
+									<label>
+										<input
+											name="method"
+											type="radio"
+											value="PATCH"
+											onclick="handleMethodChange(this);"
+											required
+										/>
+										PATCH
+									</label>
+									<label>
+										<input
+											name="method"
+											type="radio"
+											value="PUT"
+											onclick="handleMethodChange(this);"
+											required
+										/>
+										PUT
+									</label>
+									<label>
+										<input 
+											name="method"
+											type="radio"
+											value="DELETE"
+											onclick="handleMethodChange(this);"
+											required
+										/>
+										DELETE
+									</label>
+								</div>
+							</div>	
+
+							<div>
+								<label>
+									Frequency
+								</label>
+								<div class="checkbox-group">
+									<label>
+										<input name="frequency" type="radio" value="10" checked required/>
+										10 seconds
+									</label>
+									<label>
+										<input name="frequency" type="radio" value="30" required/>
+										30 seconds
+									</label>
+									<label>
+										<input name="frequency" type="radio" value="60" required/>
+										1 minute
+									</label>
+								</div>
+							</div>	
+
+							<div>
+								<label>
+									Timeout
+								</label>
+								<div class="checkbox-group">
+									<label>
+										<input name="timeout" type="radio" value="5" checked required/>
+										5 seconds
+									</label>
+									<label>
+										<input name="timeout" type="radio" value="10" required/>
+										10 seconds
+									</label>
+									<label>
+										<input name="timeout" type="radio" value="15" required/>
+										15 seconds
+									</label>
+								</div>
+							</div>
+
+							<div>
+								<label>
+									Attempt(s)
+								</label>
+								<div class="checkbox-group">
+									<label>
+										<input name="attempts" type="radio" value="1" checked required/>
+										1
+									</label>
+									<label>
+										<input name="attempts" type="radio" value="2" required/>
+										2
+									</label>
+									<label>
+										<input name="attempts" type="radio" value="3" required/>
+										3
+									</label>
+								</div>
+							</div>
+						</div>
+
+						<div class="request-headers-container">
+							<fieldset class="param-box">
+								<legend>Request headers</legend>
+								<div class="entity-empty-state entity-empty-state--secondary">
+									<div class="icon">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+											<path d="M3 4.75a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM6.25 3a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM6.25 7.25a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM6.25 11.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM4 12.25a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM3 9a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" />
+										</svg>
+									</div>
+									<span>No headers set</span>
+									<button
+										class="action"
+										type="button"
+										onclick="addParamOnClick(this);"
+									>
+										Add header
+									</button>
+								</div>
+								<fieldset class="param-box__inputs" disabled>
+									<legend class="hide">Request headers list</legend>
+									<div class="param-box__list">
+										<div class="param-box__item">
+											<input name="header-key" required placeholder="Key" />
+											<input name="header-value" required placeholder="Value" />
+											<button type="button" onclick="removeParamOnClick(this);">
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+													<path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+												</svg>
+											</button>
+										</div>
+									</div>
+									<button class="param-box__add" type="button" onclick="addParamOnClick(this);">
+										<div>
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+												<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+											</svg>
+										</div>
+										<span>Add header</span>
+									</button>
+								</fieldset>
+							</fieldset>
+						</div>
+
+
+						<div id="request-body-container" style="display: none;">
+							<div class="request-body">
+								<label>
+									Request body
+								</label>
+
+								<div>
+									<div>
+										<input 
+											type="radio"
+											name="format"
+											value="text"
+											required
+											checked
+											onchange="handleFormatChange(this);"
+										/>
+										<span>Text</span>
+									</div>
+									<div>
+										<input
+											type="radio" 
+											name="format"
+											value="form"
+											onchange="handleFormatChange(this);" 
+											required/>
+										<span>Form</span>
+									</div>
+								</div>
+							</div>
+
+							<div id="editor-container" style="width: 100%; height: 600px; margin-top: 1.0rem;"></div>
+							<input name="body" required type="hidden"/>
+							<fieldset id="body-param-box" class="param-box">
+								<legend class="hide">Form values</legend>
+								<div 
+									class="entity-empty-state entity-empty-state--secondary"
+									style="display: none;"
+								>
+									<div class="icon">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+											<path d="M3 4.75a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM6.25 3a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM6.25 7.25a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM6.25 11.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-7ZM4 12.25a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM3 9a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z" />
+										</svg>
+									</div>
+									<span>No parameters set</span>
+									<button
+										class="action"
+										type="button"
+										onclick="addParamOnClick(this);"
+									>
+										Add parameter
+									</button>
+								</div>
+								<fieldset class="param-box__inputs" disabled>
+									<div class="param-box__list">
+										<div class="param-box__item">
+											<input name="form-key" required placeholder="Key" />
+											<input name="form-value" required placeholder="Value" />
+											<button type="button" onclick="removeParamOnClick(this);">
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+													<path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+												</svg>
+											</button>
+										</div>
+									</div>
+									<button class="param-box__add" type="button" onclick="addParamOnClick(this);">
+										<div>
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+												<path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
+											</svg>
+										</div>
+										<span>Add parameter</span>
+									</button>
+								</fieldset>
+							</fieldset>
+						</div>
+
+						<div
+							id="notification-channels"
+							class="notification-channels"
+							{{if eq .RefreshID "notification-channels"}}hx-swap-oob="true"{{end}}
+						>
+							<label>
+								<span>Notification channels</span>
+							</label>
+
+							{{if not (len .Notifications)}}
+								<div
+									class="entity-empty-state entity-empty-state--secondary" 
+									style="margin-top: 1.0rem;"
+								>
+									<div class="icon">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+											<path fill-rule="evenodd" d="M10 2a6 6 0 0 0-6 6c0 1.887-.454 3.665-1.257 5.234a.75.75 0 0 0 .515 1.076 32.91 32.91 0 0 0 3.256.508 3.5 3.5 0 0 0 6.972 0 32.903 32.903 0 0 0 3.256-.508.75.75 0 0 0 .515-1.076A11.448 11.448 0 0 1 16 8a6 6 0 0 0-6-6ZM8.05 14.943a33.54 33.54 0 0 0 3.9 0 2 2 0 0 1-3.9 0Z" clip-rule="evenodd" />
+										</svg> 
+									</div>
+									<span>No notification channels found</span>
+									<div class="actions">
+										<a class="action" href="/admin/notifications/create" target="_blank">
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+												<path d="M6.22 8.72a.75.75 0 0 0 1.06 1.06l5.22-5.22v1.69a.75.75 0 0 0 1.5 0v-3.5a.75.75 0 0 0-.75-.75h-3.5a.75.75 0 0 0 0 1.5h1.69L6.22 8.72Z" />
+												<path d="M3.5 6.75c0-.69.56-1.25 1.25-1.25H7A.75.75 0 0 0 7 4H4.75A2.75 2.75 0 0 0 2 6.75v4.5A2.75 2.75 0 0 0 4.75 14h4.5A2.75 2.75 0 0 0 12 11.25V9a.75.75 0 0 0-1.5 0v2.25c0 .69-.56 1.25-1.25 1.25h-4.5c-.69 0-1.25-.56-1.25-1.25v-4.5Z" />
+											</svg>
+											Add channel
+										</a>
+										<button type="button" class="empty-state-refresh" hx-get="?refresh=notification-channels">
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+												<path fill-rule="evenodd" d="M13.836 2.477a.75.75 0 0 1 .75.75v3.182a.75.75 0 0 1-.75.75h-3.182a.75.75 0 0 1 0-1.5h1.37l-.84-.841a4.5 4.5 0 0 0-7.08.932.75.75 0 0 1-1.3-.75 6 6 0 0 1 9.44-1.242l.842.84V3.227a.75.75 0 0 1 .75-.75Zm-.911 7.5A.75.75 0 0 1 13.199 11a6 6 0 0 1-9.44 1.241l-.84-.84v1.371a.75.75 0 0 1-1.5 0V9.591a.75.75 0 0 1 .75-.75H5.35a.75.75 0 0 1 0 1.5H3.98l.841.841a4.5 4.5 0 0 0 7.08-.932.75.75 0 0 1 1.025-.273Z" clip-rule="evenodd" />
+											</svg>
+											Refresh
+										</button>
+									</div>
+								</div>
+							{{end}}
+
+							<div class="notification-channels-group">
+								{{range $notification := .Notifications}}
+									<label>
+										<input type="checkbox" name="notification-channels" value="{{$notification.ID}}" />
+										<span>
+											{{if eq $notification.Type "smtp"}}
+												<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+													<path d="M3 4a2 2 0 00-2 2v1.161l8.441 4.221a1.25 1.25 0 001.118 0L19 7.162V6a2 2 0 00-2-2H3z" />
+													<path d="M19 8.839l-7.77 3.885a2.75 2.75 0 01-2.46 0L1 8.839V14a2 2 0 002 2h14a2 2 0 002-2V8.839z" />
+												</svg>
+											{{else if eq $notification.Type "slack"}}
+												<svg viewBox="0 0 124 124" fill="none" xmlns="http://www.w3.org/2000/svg">
+													<path d="M26.3996 78.2003C26.3996 85.3003 20.5996 91.1003 13.4996 91.1003C6.39961 91.1003 0.599609 85.3003 0.599609 78.2003C0.599609 71.1003 6.39961 65.3003 13.4996 65.3003H26.3996V78.2003Z" fill="#E01E5A"/>
+													<path d="M32.9004 78.2003C32.9004 71.1003 38.7004 65.3003 45.8004 65.3003C52.9004 65.3003 58.7004 71.1003 58.7004 78.2003V110.5C58.7004 117.6 52.9004 123.4 45.8004 123.4C38.7004 123.4 32.9004 117.6 32.9004 110.5V78.2003Z" fill="#E01E5A"/>
+													<path d="M45.8004 26.4001C38.7004 26.4001 32.9004 20.6001 32.9004 13.5001C32.9004 6.4001 38.7004 0.600098 45.8004 0.600098C52.9004 0.600098 58.7004 6.4001 58.7004 13.5001V26.4001H45.8004Z" fill="#36C5F0"/>
+													<path d="M45.7996 32.8999C52.8996 32.8999 58.6996 38.6999 58.6996 45.7999C58.6996 52.8999 52.8996 58.6999 45.7996 58.6999H13.4996C6.39961 58.6999 0.599609 52.8999 0.599609 45.7999C0.599609 38.6999 6.39961 32.8999 13.4996 32.8999H45.7996Z" fill="#36C5F0"/>
+													<path d="M97.5996 45.7999C97.5996 38.6999 103.4 32.8999 110.5 32.8999C117.6 32.8999 123.4 38.6999 123.4 45.7999C123.4 52.8999 117.6 58.6999 110.5 58.6999H97.5996V45.7999Z" fill="#2EB67D"/>
+													<path d="M91.0988 45.8001C91.0988 52.9001 85.2988 58.7001 78.1988 58.7001C71.0988 58.7001 65.2988 52.9001 65.2988 45.8001V13.5001C65.2988 6.4001 71.0988 0.600098 78.1988 0.600098C85.2988 0.600098 91.0988 6.4001 91.0988 13.5001V45.8001Z" fill="#2EB67D"/>
+													<path d="M78.1988 97.6001C85.2988 97.6001 91.0988 103.4 91.0988 110.5C91.0988 117.6 85.2988 123.4 78.1988 123.4C71.0988 123.4 65.2988 117.6 65.2988 110.5V97.6001H78.1988Z" fill="#ECB22E"/>
+													<path d="M78.1988 91.1003C71.0988 91.1003 65.2988 85.3003 65.2988 78.2003C65.2988 71.1003 71.0988 65.3003 78.1988 65.3003H110.499C117.599 65.3003 123.399 71.1003 123.399 78.2003C123.399 85.3003 117.599 91.1003 110.499 91.1003H78.1988Z" fill="#ECB22E"/>
+												</svg>
+											{{end}}
+											{{$notification.Name}}
+										</span>
+									</label>
+								{{end}}
+							</div>
+						</div>
+
+						<fieldset 
+							id="notification-mail-groups"
+							class="notification-mail-groups"
+							{{if eq .RefreshID "notification-mail-groups"}}hx-swap-oob="true"{{end}}
+						>
+							<legend>
+								Mail groups
+							</legend>
+
+							{{if not (len .MailGroups)}}
+								<div
+									class="entity-empty-state entity-empty-state--secondary" 
+									style="margin-top: 1.0rem;"
+								>
+									<div class="icon">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+											<path d="M3 4a2 2 0 0 0-2 2v1.161l8.441 4.221a1.25 1.25 0 0 0 1.118 0L19 7.162V6a2 2 0 0 0-2-2H3Z" />
+											<path d="m19 8.839-7.77 3.885a2.75 2.75 0 0 1-2.46 0L1 8.839V14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.839Z" />
+										</svg>  
+									</div>
+									<span>
+										No mail groups found
+									</span>
+									<div class="actions">
+										<a class="action" href="/admin/notifications/mail-groups/create" target="_blank">
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+												<path d="M6.22 8.72a.75.75 0 0 0 1.06 1.06l5.22-5.22v1.69a.75.75 0 0 0 1.5 0v-3.5a.75.75 0 0 0-.75-.75h-3.5a.75.75 0 0 0 0 1.5h1.69L6.22 8.72Z" />
+												<path d="M3.5 6.75c0-.69.56-1.25 1.25-1.25H7A.75.75 0 0 0 7 4H4.75A2.75 2.75 0 0 0 2 6.75v4.5A2.75 2.75 0 0 0 4.75 14h4.5A2.75 2.75 0 0 0 12 11.25V9a.75.75 0 0 0-1.5 0v2.25c0 .69-.56 1.25-1.25 1.25h-4.5c-.69 0-1.25-.56-1.25-1.25v-4.5Z" />
+											</svg>
+											Add mail group
+										</a>
+										<button type="button" class="empty-state-refresh" hx-get="?refresh=notification-mail-groups">
+											<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+												<path fill-rule="evenodd" d="M13.836 2.477a.75.75 0 0 1 .75.75v3.182a.75.75 0 0 1-.75.75h-3.182a.75.75 0 0 1 0-1.5h1.37l-.84-.841a4.5 4.5 0 0 0-7.08.932.75.75 0 0 1-1.3-.75 6 6 0 0 1 9.44-1.242l.842.84V3.227a.75.75 0 0 1 .75-.75Zm-.911 7.5A.75.75 0 0 1 13.199 11a6 6 0 0 1-9.44 1.241l-.84-.84v1.371a.75.75 0 0 1-1.5 0V9.591a.75.75 0 0 1 .75-.75H5.35a.75.75 0 0 1 0 1.5H3.98l.841.841a4.5 4.5 0 0 0 7.08-.932.75.75 0 0 1 1.025-.273Z" clip-rule="evenodd" />
+											</svg>
+											Refresh
+										</button>
+									</div>
+								</div>
+							{{end}}
+
+							<div class="notification-mail-groups-group">
+								{{range $mailGroup := .MailGroups}}
+									<label>
+										<input 
+											type="checkbox"
+											name="mail-groups"
+											value="{{$mailGroup.ID}}"
+										/>
+										<span>
+											<span>
+												{{$mailGroup.Name}}
+											</span>
+											<span>
+												{{$mailGroup.Description}}
+											</span>
+										</span>
+									</label>
+								{{end}}
+							</div>
+						</fieldset>
+
+						<div>
+							<button type="submit">Create</button>
+						</div>
+
+						<link
+							rel="stylesheet"
+							data-name="vs/editor/editor.main"
+							href="/static/monaco-editor/min/vs/editor/editor.main.css"
+						/>
+			
+						<script>
+							var require = { paths: { vs: '/static/monaco-editor/min/vs' } };
+						</script>
+						
+						<script>
+							function addParamOnClick(e) {
+								const root = e.closest(".param-box");
+
+								const paramBoxInputs = root.querySelector(".param-box__inputs");
+
+								if (paramBoxInputs.disabled) {
+									paramBoxInputs.disabled = false;
+									root.querySelector(".entity-empty-state").style.display = "none";
+									return;
+								}
+
+								const items = root.querySelectorAll(".param-box__item")
+
+								const clone = items[0].cloneNode(true);
+
+								const paramBoxList = root.querySelector(".param-box__list")
+										
+								const insertedClone = paramBoxList.appendChild(
+									clone,
+								);
+
+								insertedClone.querySelectorAll("input").forEach(v => {
+									v.value = "";
+								});
+							}
+							
+							function removeParamOnClick(e) {
+								const root = e.closest(".param-box");
+
+								const paramBoxInputs = root.querySelector(".param-box__inputs");
+								
+								const items = paramBoxInputs.querySelectorAll(".param-box__item");
+								if (items.length === 1) {								
+									const emptyState = root.querySelector(".entity-empty-state");
+									emptyState.style.display = "flex";
+									root.querySelector(".param-box__inputs").disabled = true;
+									[...root.querySelectorAll("input")].forEach(v => v.value = "");
+								} else {
+									e.parentElement.remove();
+								}
+							}
+
+							function handleFormatChange(e) {
+								const form = e.closest("form");
+								
+								const format = e.value;
+
+								const editorContainer = document.getElementById("editor-container");
+								const paramBox = document.querySelector("#body-param-box");
+
+								if (format === "form") {
+									e.form.elements["body"].disabled = true;
+									editorContainer.style.display = "none";
+									paramBox.style.display = "block";
+									paramBox.disabled = false;
+									if (format === "form") {
+										if (
+											form.elements["form-key"].value ||
+											form.elements["form-value"].value ||
+											form.elements["form-key"].length
+										) {
+											paramBox.querySelector(".param-box__inputs").disabled = false;
+										} else {
+											paramBox.querySelector(".entity-empty-state").style.display = "flex";
+										}
+									}
+								} else if (format === "text") {
+									e.form.elements["body"].disabled = false;
+									editorContainer.style.display = "block";
+									paramBox.style.display = "none";
+									paramBox.disabled = true;
+									paramBox.querySelector(".param-box__inputs").disabled = true;
+								}
+							}
+
+							function handleMethodChange(e) {
+								const form = e.closest("form");
+
+								const format = form.elements["format"];
+
+								const bodyContainer = document.querySelector("#request-body-container");
+
+								const paramBox = document.querySelector("#body-param-box");
+
+								if (["GET", "DELETE"].includes(e.value)) {
+									bodyContainer.style.display = "none";
+									form.elements["format"].forEach(v => {
+										v.disabled = true;
+									});
+									paramBox.querySelector(".param-box__inputs").disabled = true;
+									form.elements["body"].disabled = true;	
+								}
+
+								if (["POST", "PATCH", "PUT"].includes(e.value)) {
+									bodyContainer.style.display = "block";
+									form.elements["format"].forEach(v => {
+										v.disabled = false;
+									});
+									if (format.value === "form") {
+										if (
+											form.elements["form-key"].value ||
+											form.elements["form-value"].value ||
+											form.elements["form-key"].length
+										) {
+										paramBox.querySelector(".param-box__inputs").disabled = false;
+										} else {
+										paramBox.querySelector(".entity-empty-state").style.display = "flex";
+										}
+									}
+									form.elements["body"].disabled = format.value !== "text";
+								}
+							}
+
+							(async () => {
+								function addScript(url) {
+									return new Promise((resolve, reject) => {
+										const script = document.createElement('script');
+										script.onload = () => {
+											resolve();
+										};
+										script.onerror = reject;
+										script.src = url;
+										document.body.appendChild(script);
+									});
+								}
+
+								const form = document.querySelector("form");
+
+								if (window.monaco) {
+									window.monaco.editor.getModels().forEach(model => model.dispose());
+									initEditor();
+								}
+
+								function initEditor() {
+									const editor = monaco.editor.create(document.getElementById("editor-container"), {
+										language: 'json',
+										fontSize: 16,
+										theme: "vs-dark",
+										minimap: {enabled: false},
+										overviewRulerLanes: 0,
+										padding: {top: 24},
+										automaticLayout: true,
+									});	
+																		
+									editor.getModel().onDidChangeContent((event) => {
+										form.elements["body"].value = editor.getModel().getValue();
+									});
+								}
+
+								if (!window.monaco) {
+									await addScript("/static/monaco-editor/min/vs/loader.js");
+									await addScript("/static/monaco-editor/min/vs/editor/editor.main.nls.js");
+									await addScript("/static/monaco-editor/min/vs/editor/editor.main.js");
+									initEditor();
+								}
+							})();
+						</script>
+					</form>
+				</div>
+			{{end}}
+		

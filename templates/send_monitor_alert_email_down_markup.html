@@ -1,0 +1,10 @@
+
+	{{- .MonitorName}} started failing<br><br>
+
+	{{- if .StatusCode}}
+		{{- "Status code"}}: {{.StatusCode}}<br>
+	{{else}}
+		{{- "Failure reason"}}: {{.Result}}<br>
+	{{- end}}
+	{{- "Checked at"}}: {{.CheckedAt}}<br><br>
+	{{- ""}}<a href="https://{{.Domain}}/admin/monitors/{{.MonitorID}}">View monitor</a>

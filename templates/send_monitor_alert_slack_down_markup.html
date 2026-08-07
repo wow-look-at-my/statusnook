@@ -1,0 +1,11 @@
+
+		{{- ":rotating_light:"}} {{.MonitorName}} started failing{{"\n\n"}}
+
+		{{- if .StatusCode}}
+			{{- "Status code"}}: {{.StatusCode}}{{"\n"}}
+		{{else}}
+			{{- "Failure reason"}}: {{.Result}}{{"\n"}}
+		{{- end}}
+		{{- "Checked at"}}: {{.CheckedAt}}{{"\n\n"}}
+		{{- ""}}<https://{{.Domain}}/admin/monitors/{{.MonitorID}}|View monitor>
+	

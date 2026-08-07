@@ -1,0 +1,11 @@
+
+		<div 
+			id="update-overlay"
+			hx-get="/admin/update/after-update"
+			hx-trigger="every 2s"
+			hx-swap="outerHTML"
+		>
+			{{.Svg}}
+			<span class="loader"></span>
+		</div>
+	
