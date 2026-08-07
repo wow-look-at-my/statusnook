@@ -127,8 +127,12 @@ func (a *testApp) login() {
 	defer tx.Rollback()
 
 	// The page injects the CSRF token with its own JavaScript, so a test that
-	// wants to POST has to read it the way the page would be handed it.
-	require.NoError(a.t, tx.QueryRow("select csrf_token from session limit 1").Scan(&a.csrfToken))
+	// wants to POST has to read it the way the page would be handed it. Newest
+	// first: a test that logs in twice, or accepts an invitation, leaves more
+	// than one session behind, and only the last one matches the cookie jar.
+	require.NoError(a.t, tx.QueryRow(
+		"select csrf_token from session order by id desc limit 1",
+	).Scan(&a.csrfToken))
 }
 
 type testResponse struct {

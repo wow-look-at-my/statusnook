@@ -140,6 +140,7 @@ func TestHandlersSurfaceAFailureAtEveryStatement(t *testing.T) {
 		"/github-config-webhook":                  {},
 	} {
 		sweepFaults(t, app, http.MethodPost, path, form)
+		requireStillAdmin(t, app, path)
 	}
 
 	for _, path := range []string{
@@ -149,15 +150,18 @@ func TestHandlersSurfaceAFailureAtEveryStatement(t *testing.T) {
 		"/admin/notifications/mail-groups/" + groupID,
 		"/admin/alerts/" + alertID + "/messages/" + messageID,
 		"/admin/alerts/" + alertID,
-		"/admin/settings/users/1",
 	} {
 		sweepFaults(t, app, http.MethodDelete, path, nil)
+		requireStillAdmin(t, app, path)
 	}
+
+	// Last: it deletes the account the sweep is signed in as.
+	sweepFaults(t, app, http.MethodDelete, "/admin/settings/users/1", nil)
 
 	// The pool is still usable afterwards: a failed statement must not have
 	// left a transaction open on the single writer connection.
 	failAtStatement(0)
-	require.Equal(t, http.StatusOK, app.get("/admin/alerts").status)
+	require.Equal(t, http.StatusOK, app.get("/").status)
 }
 
 // The routes that need something set up first: a pending subscription to
@@ -197,14 +201,13 @@ func TestPreparedRequestsSurfaceAFailureAtEveryStatement(t *testing.T) {
 		sweepFaults(t, app, http.MethodGet, path, nil)
 	}
 
+	// /cross-auth signs whoever follows it in, so the sweep above ends holding
+	// a session the client's CSRF token no longer belongs to.
+	failAtStatement(0)
+	app.login()
+
 	for path, form := range map[string]url.Values{
-		"/login":                             {"username": {"admin"}, "password": {"hunter2hunter2"}},
-		"/logout":                            {},
 		"/subscribe/email/confirm?token=tok": {},
-		"/invitation/" + invitation: {
-			"username": {"invited"}, "password": {"hunter2hunter2"},
-			"password-confirmation": {"hunter2hunter2"},
-		},
 		"/admin/monitors/" + monitorID + "/edit": {
 			"name": {"API"}, "url": {"https://example.com/health"}, "method": {"GET"},
 			"frequency": {"60"}, "timeout": {"5"}, "attempts": {"2"},
@@ -219,10 +222,33 @@ func TestPreparedRequestsSurfaceAFailureAtEveryStatement(t *testing.T) {
 		"/admin/settings/config-settings/generate-webhook-secret": {},
 	} {
 		sweepFaults(t, app, http.MethodPost, path, form)
+		requireStillAdmin(t, app, path)
 	}
+
+	// Each of these ends the session the sweep is running under -- logout by
+	// deleting it, the other two by issuing one whose CSRF token the client
+	// does not hold -- so they go last, and the sweep is over afterwards.
+	sweepFaults(t, app, http.MethodPost, "/invitation/"+invitation, url.Values{
+		"username": {"invited"}, "password": {"hunter2hunter2"},
+		"password-confirmation": {"hunter2hunter2"},
+	})
+	sweepFaults(t, app, http.MethodPost, "/logout", nil)
+	sweepFaults(t, app, http.MethodPost, "/login",
+		url.Values{"username": {"admin"}, "password": {"hunter2hunter2"}})
 
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// A POST, not a GET: a lost session and a stale CSRF token both answer every
+// later POST before it runs a single statement, so the sweep would walk the
+// rest of its routes reporting success having swept nothing at all.
+func requireStillAdmin(t *testing.T, app *testApp, after string) {
+	t.Helper()
+
+	failAtStatement(0)
+	require.Less(t, app.post("/admin/resolve", nil).status, 400,
+		"the admin session did not survive sweeping %s", after)
 }
 
 // The first-boot wizard writes as it goes, so a failure partway has to stop the
