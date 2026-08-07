@@ -1,8 +1,6 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -21,44 +19,6 @@ type service struct {
 	Slug       string
 	Name       string
 	HelperText string
-}
-
-func listServices(tx *sql.Tx) ([]service, error) {
-	const query = `
-		select 
-			id, slug, name, helper_text
-		from
-			service
-	`
-
-	services := []service{}
-
-	rows, err := tx.Query(query)
-	if err != nil {
-		return services, fmt.Errorf("listServices.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		svc := service{}
-		err = rows.Scan(
-			&svc.ID,
-			&svc.Slug,
-			&svc.Name,
-			&svc.HelperText,
-		)
-		if err != nil {
-			return services, fmt.Errorf("listServices.Scan: %w", err)
-		}
-
-		services = append(services, svc)
-	}
-
-	if err := rows.Err(); err != nil {
-		return services, fmt.Errorf("listServices.RowsErr: %w", err)
-	}
-
-	return services, nil
 }
 
 func services(w http.ResponseWriter, r *http.Request) {
@@ -132,19 +92,6 @@ func getCreateService(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func createService(tx *sql.Tx, slug string, name string, helperText string) error {
-	const query = `
-		insert into service(slug, name, helper_text) values(?, ?, ?)
-	`
-
-	_, err := tx.Exec(query, slug, name, helperText)
-	if err != nil {
-		return fmt.Errorf("createService.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func postCreateService(w http.ResponseWriter, r *http.Request) {
 	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
@@ -196,19 +143,6 @@ func postCreateService(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/services")
 }
 
-func deleteServiceByID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from service where id = $1
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteServiceByID.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func deleteService(w http.ResponseWriter, r *http.Request) {
 	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
@@ -246,25 +180,6 @@ func deleteService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("HX-Location", "/admin/services")
-}
-
-func getServiceByID(tx *sql.Tx, id int) (service, error) {
-	const query = `
-		select id, name, helper_text from service where id = $1
-	`
-
-	service := service{}
-
-	err := tx.QueryRow(query, id).Scan(
-		&service.ID,
-		&service.Name,
-		&service.HelperText,
-	)
-	if err != nil {
-		return service, fmt.Errorf("getServiceByID.Scan: %w", err)
-	}
-
-	return service, nil
 }
 
 func getEditService(w http.ResponseWriter, r *http.Request) {
@@ -322,34 +237,6 @@ func getEditService(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func editService(tx *sql.Tx, id int, name string, helperText string) error {
-	const query = `
-		update service set name = ?, helper_text = ? where id = ?
-	`
-
-	_, err := tx.Exec(query, name, helperText, id)
-	if err != nil {
-		return fmt.Errorf("editService.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func updateServiceSlug(tx *sql.Tx, old string, new string) (int, error) {
-	const query = `
-		update service set slug = ? where slug = ? returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, new, old).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("updateServiceSlug.Exec: %w", err)
-	}
-
-	return id, nil
 }
 
 func postEditService(w http.ResponseWriter, r *http.Request) {
