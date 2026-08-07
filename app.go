@@ -32,10 +32,13 @@ var appWg sync.WaitGroup
 var appCtx context.Context
 var cancelAppCtx context.CancelFunc
 
-// One place for the host every GitHub call goes to -- the config webhook, the
-// repo and config-path checks on the settings page, and the update check. A
-// variable rather than a constant so a test can point them at a local server.
+// One place per external API for the host its calls go to -- GitHub for the
+// config webhook, the repo and config-path checks and the update check; Slack
+// for the install callback; Postmark for the suppression sync. Variables
+// rather than constants so a test can point them at a local server.
 var githubAPIBaseURL = "https://api.github.com"
+var slackAPIBaseURL = "https://slack.com"
+var postmarkAPIBaseURL = "https://api.postmarkapp.com"
 
 type statusCtxKey struct{}
 

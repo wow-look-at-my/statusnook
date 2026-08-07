@@ -387,7 +387,7 @@ func postmarkDeleteSuppression(email string, token string, stream string) error 
 
 	req, err := http.NewRequest(
 		http.MethodPost,
-		"https://api.postmarkapp.com/message-streams/"+stream+"/suppressions/delete",
+		postmarkAPIBaseURL+"/message-streams/"+stream+"/suppressions/delete",
 		strings.NewReader(body),
 	)
 	if err != nil {
@@ -424,7 +424,7 @@ func postmarkDumpSupressions(token string, stream string) (SupressionDumpRespons
 
 	req, err := http.NewRequest(
 		http.MethodGet,
-		"https://api.postmarkapp.com/message-streams/"+stream+"/suppressions/dump"+
+		postmarkAPIBaseURL+"/message-streams/"+stream+"/suppressions/dump"+
 			"?SupressionReason=ManualSuppression",
 		nil,
 	)

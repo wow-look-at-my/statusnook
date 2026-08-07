@@ -113,7 +113,7 @@ func slackOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	form.Add("client_id", slackInstallURL.Query().Get("client_id"))
 	form.Add("client_secret", settings.SlackClientSecret)
 
-	resp, err := http.PostForm("https://slack.com/api/oauth.v2.access", form)
+	resp, err := http.PostForm(slackAPIBaseURL+"/api/oauth.v2.access", form)
 	if err != nil {
 		log.Printf("slackOAuth2Callback.PostForm: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
