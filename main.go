@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -11,6 +12,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -45,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	textTemplate "text/template"
 	"time"
@@ -118,12 +121,29 @@ func Migration1715019045AddSlugColumns(tx *sql.Tx) error {
 	return nil
 }
 
+// migrationName strips the extension from a migration filename.
+//
+// TrimRight takes a CUTSET, not a suffix, so the old spelling turned
+// "..._add_slug_columns.sql" into "..._add_slug_column" -- eating the trailing
+// "s" too. Harmless while both the write and the compare were equally wrong,
+// but two migrations differing only by a trailing s or l would collapse onto
+// one name and hit the unique constraint, which is a log.Fatalf at startup.
+func migrationName(fileName string) string {
+	return strings.TrimSuffix(fileName, ".sql")
+}
+
 func initDB(immediate bool) *sql.DB {
+	// 0700, not ModePerm: app.db holds every live session token, the bcrypt
+	// hashes, the SMTP and Slack credentials, the GitHub PAT, and the AES key
+	// that decrypts every `secret_` value. On a shared host 0755 hands all of
+	// that to any local account.
 	if _, err := os.Stat("statusnook-data"); errors.Is(err, os.ErrNotExist) {
-		err := os.Mkdir("statusnook-data", os.ModePerm)
+		err := os.Mkdir("statusnook-data", 0700)
 		if err != nil {
 			log.Fatalf("initDB.Mkdir: %s", err)
 		}
+	} else if err := os.Chmod("statusnook-data", 0700); err != nil {
+		log.Fatalf("initDB.Chmod: %s", err)
 	}
 
 	dsn := "file:statusnook-data/app.db?_foreign_keys=on&_journal_mode=wal"
@@ -181,7 +201,7 @@ func initDB(immediate bool) *sql.DB {
 				if i < len(files)-1 {
 					placeholders += ", "
 				}
-				params = append(params, strings.TrimRight(v.Name(), ".sql"), true)
+				params = append(params, migrationName(v.Name()), true)
 			}
 
 			insertMigrationQuery := fmt.Sprintf(
@@ -230,11 +250,25 @@ func initDB(immediate bool) *sql.DB {
 				existingMigrations[name] = true
 			}
 
+			if err := rows.Err(); err != nil {
+				log.Fatalf("initDB.RowsErrMigration: %s", err)
+			}
+
 			for _, file := range files {
-				migrationName := strings.TrimRight(file.Name(), ".sql")
-				if _, ok := existingMigrations[migrationName]; ok {
+				name := migrationName(file.Name())
+
+				// Installs that ran the old TrimRight spelling recorded the
+				// truncated name, so both count as already-applied. Without
+				// this the rename re-runs every migration whose name ends in a
+				// character from ".sql".
+				_, applied := existingMigrations[name]
+				if !applied {
+					_, applied = existingMigrations[strings.TrimRight(file.Name(), ".sql")]
+				}
+				if applied {
 					continue
 				}
+				migrationName := name
 
 				data, err := migrationsFS.ReadFile(path.Join("migrations", file.Name()))
 				if err != nil {
@@ -285,7 +319,34 @@ func initDB(immediate bool) *sql.DB {
 		}
 	}
 
+	restrictDBFilePermissions()
+
 	return db
+}
+
+// restrictDBFilePermissions narrows the database files to 0600. SQLite creates
+// them with 0644 minus the umask, and their contents are session tokens,
+// credentials and the secret key -- see the comment in initDB.
+func restrictDBFilePermissions() {
+	for _, name := range []string{
+		"statusnook-data/app.db",
+		"statusnook-data/app.db-wal",
+		"statusnook-data/app.db-shm",
+	} {
+		err := os.Chmod(name, 0600)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		// Loud, because the alternative is a database readable by every
+		// account on the host and nobody knowing.
+		log.Printf(
+			"ERROR restrictDBFilePermissions.Chmod %s: %s -- this file may be "+
+				"readable by other users on this host",
+			name,
+			err,
+		)
+	}
 }
 
 func copyTable(tx *sql.Tx, src string, dst string) error {
@@ -306,6 +367,10 @@ func copyTable(tx *sql.Tx, src string, dst string) error {
 		}
 
 		cols = append(cols, col)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("copyTable.RowsErr: %w", err)
 	}
 
 	query := fmt.Sprintf(`
@@ -350,6 +415,10 @@ func copyNonSlugToSlugTable(tx *sql.Tx, src string, dst string) error {
 		}
 
 		srcCols = append(srcCols, col)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("copyNonSlugToSlugTable.RowsErr: %w", err)
 	}
 
 	dstCols := append(append([]string{}, "id", "slug"), srcCols[1:]...)
@@ -431,6 +500,10 @@ func generateSlugBackfillCte(tx *sql.Tx, tableName string) (string, []any, error
 		sortedIds = append(sortedIds, id)
 	}
 
+	if err := rows.Err(); err != nil {
+		return "", []any{}, fmt.Errorf("generateSlugBackfillCte.RowsErr: %w", err)
+	}
+
 	if len(idToName) == 0 {
 		return "", []any{}, nil
 	}
@@ -483,10 +556,14 @@ func generateSlugBackfillCte(tx *sql.Tx, tableName string) (string, []any, error
 	return updateQuery, params, nil
 }
 
+var tmplsMu sync.RWMutex
 var tmpls = map[string]*template.Template{}
 
 func parseTmpl(name string, markup string) (*template.Template, error) {
-	if tmpl, ok := tmpls[name]; ok {
+	tmplsMu.RLock()
+	tmpl, ok := tmpls[name]
+	tmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
@@ -771,45 +848,59 @@ func parseTmpl(name string, markup string) (*template.Template, error) {
 		return tmpl, err
 	}
 
+	tmplsMu.Lock()
 	tmpls[name] = tmpl
+	tmplsMu.Unlock()
 
 	return tmpl, nil
 }
 
+var emailTmplsMu sync.RWMutex
 var emailTmpls = map[string]*template.Template{}
 
 func parseEmailTmpl(name string, markup string) (*template.Template, error) {
-	if tmpl, ok := emailTmpls[name]; ok {
+	emailTmplsMu.RLock()
+	tmpl, ok := emailTmpls[name]
+	emailTmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
-	tmpl := template.New(name)
+	tmpl = template.New(name)
 
 	tmpl, err := tmpl.Parse(markup)
 	if err != nil {
 		return tmpl, fmt.Errorf("parseEmailTmpl.Parse: %w", err)
 	}
 
+	emailTmplsMu.Lock()
 	emailTmpls[name] = tmpl
+	emailTmplsMu.Unlock()
 
 	return tmpl, nil
 }
 
+var textTmplsMu sync.RWMutex
 var textTmpls = map[string]*textTemplate.Template{}
 
 func parseTextTmpl(name string, markup string) (*textTemplate.Template, error) {
-	if tmpl, ok := textTmpls[name]; ok {
+	textTmplsMu.RLock()
+	tmpl, ok := textTmpls[name]
+	textTmplsMu.RUnlock()
+	if ok {
 		return tmpl, nil
 	}
 
-	tmpl := textTemplate.New(name)
+	tmpl = textTemplate.New(name)
 
 	tmpl, err := tmpl.Parse(markup)
 	if err != nil {
 		return tmpl, fmt.Errorf("parseTextTmpl.Parse: %w", err)
 	}
 
+	textTmplsMu.Lock()
 	textTmpls[name] = tmpl
+	textTmplsMu.Unlock()
 
 	return tmpl, nil
 }
@@ -825,15 +916,15 @@ var db *sql.DB
 var appCtx context.Context
 var cancelAppCtx context.CancelFunc
 var rwDB *sql.DB
-var metaSetup string
-var metaName string
-var metaDomain string
-var metaUnconfirmedDomain string
-var metaUnconfirmedDomainProblem string
+var metaSetup atomicString
+var metaName atomicString
+var metaDomain atomicString
+var metaUnconfirmedDomain atomicString
+var metaUnconfirmedDomainProblem atomicString
 
-var metaSSL string
+var metaSSL atomicString
 
-var metaConfigFileEnabled bool
+var metaConfigFileEnabled atomic.Bool
 
 type statusCtxKey struct{}
 
@@ -869,24 +960,30 @@ func getPageCtx(r *http.Request) pageCtx {
 		adminArea = true
 	}
 
-	parsedURL, _ := url.ParseRequestURI("https://" + r.Host)
+	// r.Host is client-supplied and net/http admits bytes that fail to parse
+	// here ("%zz", "[bad", "a:b:c"), which returned a nil URL that the
+	// redirect check below dereferenced.
+	hostname := ""
+	if parsedURL, err := url.ParseRequestURI("https://" + r.Host); err == nil {
+		hostname = parsedURL.Hostname()
+	}
 
 	return pageCtx{
 		Status:                   status,
 		Auth:                     authCtx,
 		Index:                    r.URL.Path == "/" || r.URL.Path == "/history",
-		Name:                     metaName,
+		Name:                     metaName.Load(),
 		HXRequest:                r.Header.Get("HX-Request") == "true",
 		HXBoosted:                r.Header.Get("HX-Boosted") == "true",
 		AdminArea:                adminArea,
 		Nav:                      adminURLPrefix,
-		UnconfirmedDomainProblem: metaUnconfirmedDomainProblem,
-		UnconfirmedDomain:        metaUnconfirmedDomain,
+		UnconfirmedDomainProblem: metaUnconfirmedDomainProblem.Load(),
+		UnconfirmedDomain:        metaUnconfirmedDomain.Load(),
 		HideUnconfirmedDomain:    r.URL.Path == "/admin/settings",
-		ShouldAttemptRedirect: metaSSL == "true" && authCtx.ID != 0 &&
-			metaDomain != "" && parsedURL.Hostname() != metaDomain,
-		Domain:     metaDomain,
-		ConfigFile: metaConfigFileEnabled,
+		ShouldAttemptRedirect: metaSSL.Load() == "true" && authCtx.ID != 0 &&
+			metaDomain.Load() != "" && hostname != metaDomain.Load(),
+		Domain:     metaDomain.Load(),
+		ConfigFile: metaConfigFileEnabled.Load(),
 	}
 }
 
@@ -900,7 +997,9 @@ func csrfMiddleware(h http.Handler) http.Handler {
 		csrfToken := r.Header.Get("csrf-token")
 		authCtx := getAuthCtx(r)
 
-		if csrfToken != authCtx.CSRFToken {
+		// Constant-time: a 32-byte token is not realistically timeable over a
+		// network, but the comparison costs nothing either way.
+		if subtle.ConstantTimeCompare([]byte(csrfToken), []byte(authCtx.CSRFToken)) != 1 {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -1010,7 +1109,6 @@ func createMonitorLogLastChecked(
 		startedAt,
 		monitorID,
 		monitorLogID,
-		monitorLogID,
 	)
 	if err != nil {
 		return fmt.Errorf("createMonitorLogLastChecked.Exec: %w", err)
@@ -1081,6 +1179,10 @@ func listAllMonitorLogLastChecked(tx *sql.Tx) ([]monitorLogLastChecked, error) {
 		}
 
 		allLastChecked = append(allLastChecked, lastChecked)
+	}
+
+	if err := rows.Err(); err != nil {
+		return allLastChecked, fmt.Errorf("listAllMonitorLogLastChecked.RowsErr: %w", err)
 	}
 
 	return allLastChecked, nil
@@ -1165,10 +1267,10 @@ func sendMonitorAlertEmail(
 	}
 
 	msg := [][]byte{
-		[]byte("Subject: " + subject + " \"" +
-			monitor.Name + "\""),
-		[]byte("To: " + strings.Join(emailAddresses, ", ")),
-		[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+		[]byte("Subject: " + headerValue(subject) + " \"" +
+			headerValue(monitor.Name) + "\""),
+		[]byte("To: " + headerValue(strings.Join(emailAddresses, ", "))),
+		[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -1176,7 +1278,7 @@ func sendMonitorAlertEmail(
 			k == "X-PM-Message-Stream" {
 			continue
 		}
-		msg = append(msg, []byte(k+": "+v))
+		msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 	}
 	if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
@@ -1228,7 +1330,7 @@ func sendMonitorAlertEmail(
 			StatusCode:  int(statusCode.Int64),
 			CheckedAt:   startedAt.Format("2006/01/02 15:04:05 MST"),
 			Result:      result,
-			Domain:      metaDomain,
+			Domain:      metaDomain.Load(),
 		},
 	)
 	if err != nil {
@@ -1317,7 +1419,7 @@ func sendMonitorAlertSlack(
 			StatusCode:  int(statusCode.Int64),
 			CheckedAt:   startedAt.Format("2006/01/02 15:04:05 MST"),
 			Result:      result,
-			Domain:      metaDomain,
+			Domain:      metaDomain.Load(),
 		},
 	)
 	if err != nil {
@@ -1343,7 +1445,23 @@ func sendMonitorAlertSlack(
 	if err != nil {
 		return fmt.Errorf("sendMonitorAlertSlack.Post: %w", err)
 	}
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
 	resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("sendMonitorAlertSlack.ReadAll: %w", readErr)
+	}
+
+	// A revoked webhook or an archived channel answers 404 invalid_token /
+	// 410 channel_is_archived, which is a perfectly successful HTTP round
+	// trip. Not checking it meant every alert to that channel was dropped in
+	// silence.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf(
+			"sendMonitorAlertSlack.StatusCode %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(respBody)),
+		)
+	}
 
 	return nil
 }
@@ -1355,7 +1473,12 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 	lastChecked := map[int]time.Time{}
 	checkout := map[int]time.Time{}
 
-	tick := time.Tick(time.Millisecond * 500)
+	// NewTicker, not Tick: time.Tick leaks its ticker and its goroutine, and
+	// these loops do exit -- on ctx.Done, and monitorUnconfirmedDomainLoop
+	// returns on its own once the domain resolves.
+	ticker := time.NewTicker(time.Millisecond * 500)
+	defer ticker.Stop()
+	tick := ticker.C
 
 	for {
 		select {
@@ -1398,7 +1521,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 					checkoutMu.RLock()
 					if _, ok := checkout[monitor.ID]; ok {
 						checkoutMu.RUnlock()
-						return
+						continue
 					}
 					checkoutMu.RUnlock()
 
@@ -1406,7 +1529,13 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 					checkout[monitor.ID] = time.Now().UTC()
 					checkoutMu.Unlock()
 
+					// Registered with the app WaitGroup: these outlive the tick
+					// that spawned them by up to attempts x timeout, and on SIGTERM
+					// they were racing db.Close() to write their monitor log.
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
+
 						var endedAt time.Time
 
 						defer func() {
@@ -1439,7 +1568,11 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								body = strings.NewReader(monitor.Body.String)
 							}
 
-							monitorReq, err := http.NewRequest(
+							// Carries the app context so a check in flight at SIGTERM
+							// aborts instead of holding shutdown for up to
+							// attempts x timeout.
+							monitorReq, err := http.NewRequestWithContext(
+								ctx,
 								monitor.Method,
 								monitor.URL,
 								body,
@@ -1452,18 +1585,22 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 								monitorReq.Header.Add(k, v)
 							}
 
+							// Cleared each attempt: a 500 on attempt 1 followed by a
+							// connection failure on attempt 2 used to log the failure
+							// with attempt 1's status code still attached.
+							statusCode = sql.NullInt64{}
+
 							resp, reqErr = httpClient.Do(monitorReq)
 							if reqErr != nil {
 								continue
 							}
 
 							_, err = io.Copy(io.Discard, resp.Body)
+							resp.Body.Close()
 							if err != nil {
 								log.Printf("monitorLoop.Copy: %s", err)
 								break
 							}
-
-							resp.Body.Close()
 
 							statusCode = sql.NullInt64{
 								Int64: int64(resp.StatusCode),
@@ -1487,8 +1624,27 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 									String: reqErr.Error(),
 									Valid:  true,
 								}
-								result = "timeout"
+
+								// Only a genuine timeout is reported as one. A DNS
+								// failure, a refused connection and a TLS error are
+								// all *url.Error too, and calling every one of them
+								// "timeout" sends whoever is debugging the outage
+								// looking in the wrong place.
+								if urlErr.Timeout() || errors.Is(reqErr, context.DeadlineExceeded) {
+									result = "timeout"
+								} else {
+									result = "error"
+								}
 							}
+						}
+
+						// attempt is the loop counter, which stops at the index of
+						// the attempt that succeeded -- so a first-try success was
+						// recorded as 0 attempts while a total failure recorded the
+						// full count. The column is shown to the operator.
+						attemptsMade := attempt
+						if result == "success" {
+							attemptsMade = attempt + 1
 						}
 
 						endedAt = time.Now().UTC()
@@ -1506,7 +1662,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 							endedAt,
 							statusCode.Int64,
 							errorMessage,
-							attempt,
+							attemptsMade,
 							result,
 							monitor.ID,
 						)
@@ -1556,10 +1712,21 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 						}
 
 						if len(channels) > 0 {
+							// ID is 0 only when there is no previous check at all
+							// (getMonitorLogLastChecked returns a zero struct on
+							// ErrNoRows). Without this a monitor added for an endpoint
+							// that is ALREADY down has no happy state to transition
+							// from, so it never alerts -- and every later failure looks
+							// like more of the same. The team first hears about the
+							// outage when it recovers.
+							firstCheck := lastChecked.ID == 0
+
 							lastHappy := lastChecked.ResponseCode.Int32 != 0 &&
 								lastChecked.ResponseCode.Int32 < 400
 
-							if lastHappy && result != "success" || !lastHappy && result == "success" {
+							if firstCheck && result != "success" ||
+								lastHappy && result != "success" ||
+								!lastHappy && result == "success" {
 								status := "down"
 								if result == "success" {
 									status = "up"
@@ -1615,7 +1782,7 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 											result,
 											httpClient,
 											status,
-											metaDomain,
+											metaDomain.Load(),
 										)
 										if err != nil {
 											log.Printf("monitorLoop.sendMonitorAlertSlack: %s", err)
@@ -1692,11 +1859,17 @@ func listUnsentAlertNotifications(tx *sql.Tx) ([]UnsentAlertNotification, error)
 		notifications = append(notifications, notification)
 	}
 
+	if err := rows.Err(); err != nil {
+		return notifications, fmt.Errorf("listUnsentAlertNotifications.RowsErr: %w", err)
+	}
+
 	return notifications, nil
 }
 
 func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
-	tick := time.Tick(time.Second * 10)
+	ticker := time.NewTicker(time.Second * 10)
+	defer ticker.Stop()
+	tick := ticker.C
 	for {
 		select {
 		case <-tick:
@@ -1720,50 +1893,60 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 					return
 				}
 
+				if len(notifications) == 0 {
+					return
+				}
+
+				// Hoisted out of the per-notification loop below. All four are
+				// constant for the batch, and listUnsentAlertNotifications
+				// returns one row per SUBSCRIBER -- so reloading every active
+				// subscription inside the loop made a single alert update
+				// O(N^2) in subscribers, against the same file the monitor
+				// loop is writing to.
+				tx, err = db.Begin()
+				if err != nil {
+					log.Printf("notificationLoop.ReadBegin: %s", err)
+					return
+				}
+				defer tx.Rollback()
+
+				notificationChannelID, err := getAlertSMTPNotificationSetting(tx)
+				if err != nil {
+					log.Printf("notificationLoop.getAlertSMTPNotificationSetting: %s", err)
+					return
+				}
+
+				notificationChannel, err := getNotificationChannelByID(tx, notificationChannelID)
+				if err != nil {
+					log.Printf("notificationLoop.getNotificationChannelByID: %s", err)
+					return
+				}
+
+				alertSettings, err := getAlertSettings(tx)
+				if err != nil {
+					log.Printf("notificationLoop.getAlertSettings: %s", err)
+					return
+				}
+
+				emailSubs, err := listActiveAlertEmailSubscriptions(tx)
+				if err != nil {
+					log.Printf("notificationLoop.listActiveAlertEmailSubscriptions: %s", err)
+					return
+				}
+
+				subTokensEmailMap := make(map[string]string, len(emailSubs))
+				for _, v := range emailSubs {
+					subTokensEmailMap[v.Destination] = v.Meta
+				}
+
+				err = tx.Commit()
+				if err != nil {
+					log.Printf("notificationLoop.ReadCommit: %s", err)
+					return
+				}
+
 				for _, notification := range notifications {
 					func() {
-						tx, err := db.Begin()
-						if err != nil {
-							log.Printf("notificationLoop.ReadBegin: %s", err)
-							return
-						}
-						defer tx.Rollback()
-
-						notificationChannelID, err := getAlertSMTPNotificationSetting(tx)
-						if err != nil {
-							log.Printf("notificationLoop.getAlertSMTPNotificationSetting: %s", err)
-							return
-						}
-
-						notificationChannel, err := getNotificationChannelByID(tx, notificationChannelID)
-						if err != nil {
-							log.Printf("notificationLoop.getNotificationChannelByID: %s", err)
-							return
-						}
-
-						alertSettings, err := getAlertSettings(tx)
-						if err != nil {
-							log.Printf("notificationLoop.getAlertSettings: %s", err)
-							return
-						}
-
-						emailSubs, err := listActiveAlertEmailSubscriptions(tx)
-						if err != nil {
-							log.Printf("notificationLoop.listActiveAlertEmailSubscriptions: %s", err)
-							return
-						}
-
-						subTokensEmailMap := make(map[string]string, len(emailSubs))
-						for _, v := range emailSubs {
-							subTokensEmailMap[v.Destination] = v.Meta
-						}
-
-						err = tx.Commit()
-						if err != nil {
-							log.Printf("notificationLoop.ReadCommit: %s", err)
-							return
-						}
-
 						severityEmoji := "🟠"
 						if notification.AlertSeverity == "red" {
 							severityEmoji = "🔴"
@@ -1837,13 +2020,15 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									Severity  string
 									Domain    string
 								}{
-									Title: strings.ToUpper(notification.AlertType[:1]) +
-										notification.AlertType[1:] + " - " + notification.AlertTitle,
-									Content:   notification.Content,
-									Services:  notification.AlertServices,
+									// Escaped: the template above is text/template, which
+									// escapes nothing, so a quote in a title broke the JSON.
+									Title: jsonString(strings.ToUpper(notification.AlertType[:1]) +
+										notification.AlertType[1:] + " - " + notification.AlertTitle),
+									Content:   jsonString(notification.Content),
+									Services:  jsonString(notification.AlertServices),
 									AlertType: notification.AlertType,
-									Severity:  severityEmoji,
-									Domain:    metaDomain,
+									Severity:  jsonString(severityEmoji),
+									Domain:    jsonString(metaDomain.Load()),
 								},
 							)
 							if err != nil {
@@ -1860,7 +2045,24 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								log.Printf("notificationLoop.Post: %s", err)
 								return
 							}
-							defer resp.Body.Close()
+							slackBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+							resp.Body.Close()
+							if readErr != nil {
+								log.Printf("notificationLoop.ReadAllSlack: %s", readErr)
+								return
+							}
+
+							// Returning here leaves sent_at null, so the next tick
+							// retries. Stamping it on a 404 from a revoked webhook
+							// dropped the alert permanently and reported nothing.
+							if resp.StatusCode != http.StatusOK {
+								log.Printf(
+									"notificationLoop.PostStatusCode %d: %s",
+									resp.StatusCode,
+									strings.TrimSpace(string(slackBody)),
+								)
+								return
+							}
 
 							tx, err := rwDB.Begin()
 							if err != nil {
@@ -1887,15 +2089,18 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 						} else if notification.Type == "email" {
 							smtpDetail, ok := notificationChannel.Details.(SMTPNotificationDetails)
 							if !ok {
-								log.Printf("notificationLoop.NotificationDetailsAssert: %s", err)
+								log.Printf(
+									"notificationLoop.NotificationDetailsAssert: channel %d is not SMTP",
+									notificationChannel.ID,
+								)
 								return
 							}
 
 							msg := [][]byte{
-								[]byte("Subject: " + metaName + " " + notification.AlertType +
-									" alert: update regarding \"" + notification.AlertTitle + "\""),
-								[]byte("To: " + notification.Destination),
-								[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+								[]byte("Subject: " + headerValue(metaName.Load()) + " " + notification.AlertType +
+									" alert: update regarding \"" + headerValue(notification.AlertTitle) + "\""),
+								[]byte("To: " + headerValue(notification.Destination)),
+								[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 								[]byte("Content-Type: text/html; charset=UTF-8"),
 							}
 							for k, v := range smtpDetail.Headers {
@@ -1903,7 +2108,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									k == "X-PM-Message-Stream" {
 									continue
 								}
-								msg = append(msg, []byte(k+": "+v))
+								msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 							}
 							if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 								msg = append(
@@ -1917,7 +2122,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 									msg,
 									[]byte("List-Unsubscribe-Post: List-Unsubscribe=One-Click"),
 									[]byte("List-Unsubscribe: "+
-										"<https://"+metaDomain+
+										"<https://"+metaDomain.Load()+
 										"/unsubscribe?token="+subTokensEmailMap[notification.Destination]+">"),
 								)
 							}
@@ -1964,7 +2169,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								}{
 									Notification:         notification,
 									SeverityEmoji:        severityEmoji,
-									Domain:               metaDomain,
+									Domain:               metaDomain.Load(),
 									ManagedSubscriptions: alertSettings.ManagedSubscriptions,
 									SubToken:             subTokensEmailMap[notification.Destination],
 								},
@@ -1994,7 +2199,7 @@ func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
 								return
 							}
 
-							tx, err = rwDB.Begin()
+							tx, err := rwDB.Begin()
 							if err != nil {
 								log.Printf("notificationLoop.BeginUpdateAlertSentAtByIDEmail: %s", err)
 								return
@@ -2056,6 +2261,33 @@ func getMetaValue(tx *sql.Tx, name string) (string, error) {
 	return v, nil
 }
 
+var staticETags = map[string]string{}
+
+// serveDecompressed inflates a gzip-only embedded asset for a client that did
+// not advertise gzip. Rare enough to do on the fly; the alternative is
+// embedding a second copy of every asset.
+func serveDecompressed(w http.ResponseWriter, gzPath string) {
+	file, err := staticFS.Open(gzPath)
+	if err != nil {
+		log.Printf("serveDecompressed.Open %s: %s", gzPath, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	reader, err := gzip.NewReader(file)
+	if err != nil {
+		log.Printf("serveDecompressed.NewReader %s: %s", gzPath, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer reader.Close()
+
+	if _, err := io.Copy(w, reader); err != nil {
+		log.Printf("serveDecompressed.Copy %s: %s", gzPath, err)
+	}
+}
+
 func neuter(next http.Handler) http.Handler {
 	gzAvailable := map[string]string{}
 	err := fs.WalkDir(staticFS, "static", func(path string, d fs.DirEntry, err error) error {
@@ -2063,6 +2295,13 @@ func neuter(next http.Handler) http.Handler {
 			if strings.HasSuffix(d.Name(), ".gz") {
 				gzAvailable[strings.Replace(path, ".gz", "", 1)] = path
 			}
+
+			contents, err := staticFS.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("neuter.ReadFile %s: %w", path, err)
+			}
+			sum := sha256.Sum256(contents)
+			staticETags[path] = `"` + hex.EncodeToString(sum[:16]) + `"`
 		}
 		return nil
 	})
@@ -2076,12 +2315,39 @@ func neuter(next http.Handler) http.Handler {
 			return
 		}
 
+		// embed.FS reports a zero ModTime, so ServeContent emits no
+		// Last-Modified and there is nothing to revalidate against. Without a
+		// freshness directive every page view re-fetched all 2.1 MB of
+		// static/, monaco included. The assets are baked into the binary, so
+		// they cannot change without the ETag changing with them.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if etag, ok := staticETags[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+			w.Header().Set("ETag", etag)
+			if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
+		// These eleven assets are embedded ONLY in their compressed form --
+		// there is no plain copy to fall back to -- so a client that does not
+		// advertise gzip is served a decompressed copy rather than a response
+		// labelled with an encoding it never asked for.
 		if gzPath, ok := gzAvailable[strings.TrimPrefix(r.URL.Path, "/")]; ok {
-			r.URL.Path = gzPath
-			split := strings.Split(r.URL.Path, ".")
+			split := strings.Split(gzPath, ".")
 			ext := split[len(split)-2]
 			w.Header().Add("Content-Type", mime.TypeByExtension("."+ext))
-			w.Header().Add("Content-Encoding", "gzip")
+			w.Header().Add("Vary", "Accept-Encoding")
+
+			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				r.URL.Path = gzPath
+				w.Header().Add("Content-Encoding", "gzip")
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			serveDecompressed(w, gzPath)
+			return
 		}
 
 		next.ServeHTTP(w, r)
@@ -2114,7 +2380,10 @@ func attemptCertificateAcquisition(ctx context.Context, domain string) error {
 
 	fileStorage, ok := certmagic.Default.Storage.(*certmagic.FileStorage)
 	if !ok {
-		return fmt.Errorf("attemptCertificateAcquisition.FileStorageAssert: %w", err)
+		// err is nil here, and %w with a nil operand yields an error whose
+		// text is %!w(<nil>) and which errors.As can never match -- so the
+		// caller's ACME-problem branch fell through to "unexpected error".
+		return errors.New("attemptCertificateAcquisition: storage is not a certmagic.FileStorage")
 	}
 
 	err = os.RemoveAll(
@@ -2133,10 +2402,12 @@ func attemptCertificateAcquisition(ctx context.Context, domain string) error {
 }
 
 func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
-	tick := time.Tick(time.Minute * 1)
+	ticker := time.NewTicker(time.Minute * 1)
+	defer ticker.Stop()
+	tick := ticker.C
 
 	for {
-		if metaUnconfirmedDomain == "" || metaUnconfirmedDomainProblem != "" {
+		if metaUnconfirmedDomain.Load() == "" || metaUnconfirmedDomainProblem.Load() != "" {
 			wg.Done()
 			return
 		}
@@ -2144,7 +2415,7 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 		select {
 		case <-tick:
 			func() {
-				found, err := lookupDomain(metaUnconfirmedDomain)
+				found, err := lookupDomain(metaUnconfirmedDomain.Load())
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.lookupDomain: %s", err)
 					return
@@ -2154,7 +2425,7 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 					return
 				}
 
-				err = attemptCertificateAcquisition(ctx, metaUnconfirmedDomain)
+				err = attemptCertificateAcquisition(ctx, metaUnconfirmedDomain.Load())
 				if err != nil {
 					unconfirmedDomainProblemMsg := "An unexpected error occurred"
 
@@ -2177,8 +2448,8 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 					}
 					defer tx.Rollback()
 
-					metaUnconfirmedDomainProblem = unconfirmedDomainProblemMsg
-					err = updateMetaValue(tx, "unconfirmedDomainProblem", metaUnconfirmedDomainProblem)
+					metaUnconfirmedDomainProblem.Store(unconfirmedDomainProblemMsg)
+					err = updateMetaValue(tx, "unconfirmedDomainProblem", metaUnconfirmedDomainProblem.Load())
 					if err != nil {
 						log.Printf("monitorUnconfirmedDomainLoop.UpdateUnconfirmedDomainProblem: %s", err)
 						return
@@ -2199,21 +2470,21 @@ func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
 				}
 				defer tx.Rollback()
 
-				metaDomain = metaUnconfirmedDomain
-				err = updateMetaValue(tx, "domain", metaUnconfirmedDomain)
+				metaDomain.Store(metaUnconfirmedDomain.Load())
+				err = updateMetaValue(tx, "domain", metaUnconfirmedDomain.Load())
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueDomain: %s", err)
 					return
 				}
 
-				metaUnconfirmedDomain = ""
+				metaUnconfirmedDomain.Store("")
 				err = updateMetaValue(tx, "unconfirmedDomain", "")
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomain: %s", err)
 					return
 				}
 
-				metaUnconfirmedDomainProblem = ""
+				metaUnconfirmedDomainProblem.Store("")
 				err = updateMetaValue(tx, "unconfirmedDomainProblem", "")
 				if err != nil {
 					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomainProblem: %s", err)
@@ -2707,11 +2978,21 @@ func applyConfig(tx *sql.Tx, cfgBytes []byte) ([]string, error) {
 				values := url.Values{}
 				for k, v := range vMap {
 					str := ""
-					if vs, ok := v.(int); ok {
+					switch vs := v.(type) {
+					case int:
 						str = strconv.Itoa(vs)
-					}
-					if vs, ok := v.(string); ok {
+					case string:
 						str = vs
+					default:
+						// A bool or a float used to become the empty string, so
+						// `body: {enabled: true}` sent "enabled=" and said nothing.
+						// The headers and misc maps already report this.
+						msgs = append(
+							msgs,
+							"monitors."+slug+": invalid body value "+k+
+								", must be string or number",
+						)
+						continue
 					}
 					values.Add(k, str)
 				}
@@ -3503,7 +3784,7 @@ func generateConfig(tx *sql.Tx) (string, error) {
 			SlackClientSecret:        alertSettings.SlackClientSecret,
 			SlackInstallURL:          alertSettings.SlackInstallURL,
 		},
-		GeneralSettings: StatusnookConfigGeneralSettings{Name: metaName},
+		GeneralSettings: StatusnookConfigGeneralSettings{Name: metaName.Load()},
 	}
 
 	cfgBytes, err := yaml.Marshal(cfg)
@@ -3522,12 +3803,26 @@ func main() {
 
 	flag.Parse()
 
+	if *validateConfigFlag != "" {
+		if err := validateConfig(*validateConfigFlag); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("config ok")
+		return
+	}
+
 	if *selfSignedFlag {
 		GenerateSelfSignedCertificate()
 		return
 	}
 
 	db = initDB(false)
+	// Unbounded by default, so a burst opened an unbounded number of SQLite
+	// connections, each re-running the DSN pragmas. Writes are already
+	// serialized on rwDB below.
+	db.SetMaxOpenConns(max(4, runtime.NumCPU()*4))
+	db.SetMaxIdleConns(4)
 
 	rwDB = initDB(true)
 	rwDB.SetMaxOpenConns(1)
@@ -3544,35 +3839,35 @@ func main() {
 		log.Fatalf("main.getMetaValueSetup: %s", err)
 		return
 	}
-	metaSetup = setup
+	metaSetup.Store(setup)
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueName: %s", err)
 		return
 	}
-	metaName = name
+	metaName.Store(name)
 
 	domain, err := getMetaValue(tx, "domain")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueDomain: %s", err)
 		return
 	}
-	metaDomain = domain
+	metaDomain.Store(domain)
 
 	unconfirmedDomain, err := getMetaValue(tx, "unconfirmedDomain")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueUnconfirmedDomain: %s", err)
 		return
 	}
-	metaUnconfirmedDomain = unconfirmedDomain
+	metaUnconfirmedDomain.Store(unconfirmedDomain)
 
 	unconfirmedDomainProblem, err := getMetaValue(tx, "unconfirmedDomainProblem")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		log.Fatalf("main.getMetaValueUnconfirmedDomainProblem: %s", err)
 		return
 	}
-	metaUnconfirmedDomainProblem = unconfirmedDomainProblem
+	metaUnconfirmedDomainProblem.Store(unconfirmedDomainProblem)
 
 	configFileEnabled, err := getMetaValue(tx, "configFileEnabled")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -3580,7 +3875,7 @@ func main() {
 		return
 	}
 	if configFileEnabled == "true" {
-		metaConfigFileEnabled = true
+		metaConfigFileEnabled.Store(true)
 	}
 
 	ssl, err := getMetaValue(tx, "ssl")
@@ -3589,18 +3884,18 @@ func main() {
 		return
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		metaSSL = "true"
+		metaSSL.Store("true")
 		if BUILD == "dev" || *portFlag != 80 {
-			metaSSL = "false"
+			metaSSL.Store("false")
 		}
 
-		err = updateMetaValue(tx, "ssl", metaSSL)
+		err = updateMetaValue(tx, "ssl", metaSSL.Load())
 		if err != nil {
 			log.Printf("main.updateMetaValueSSL: %s", err)
 			return
 		}
 	} else {
-		metaSSL = ssl
+		metaSSL.Store(ssl)
 	}
 
 	_, err = getMetaValue(tx, "secretKey")
@@ -3636,7 +3931,24 @@ func main() {
 	if BUILD == "dev" {
 		r.Use(middleware.Logger)
 	}
-	if BUILD == "release" && metaSSL == "true" {
+
+	// No CSP: the pages carry inline <script> blocks that would need nonces
+	// first. The rest cost nothing. X-Frame-Options matters more than usual
+	// here -- the CSRF token is injected by the page's own JavaScript, so a
+	// framed admin's click carries a valid token.
+	r.Use(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS != nil {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			h.ServeHTTP(w, r)
+		})
+	})
+
+	if BUILD == "release" && metaSSL.Load() == "true" {
 		r.Use(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if certmagic.DefaultACME.HandleHTTPChallenge(w, r) {
@@ -3666,9 +3978,12 @@ func main() {
 	}
 	r.Use(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if metaSetup != "done" &&
+			// /healthz is exempt so a probe still answers on an instance
+			// nobody has finished setting up.
+			if metaSetup.Load() != "done" &&
 				!strings.HasPrefix(r.URL.Path, "/setup") &&
-				!strings.HasPrefix(r.URL.Path, "/static") {
+				!strings.HasPrefix(r.URL.Path, "/static") &&
+				r.URL.Path != "/healthz" {
 				http.Redirect(w, r, "/setup", http.StatusFound)
 				return
 			}
@@ -3677,6 +3992,14 @@ func main() {
 	})
 	r.Use(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Neither static assets nor the health probe have a session to
+			// look up, and this middleware opens a transaction for every
+			// request that reaches it -- every image and font included.
+			if strings.HasPrefix(r.URL.Path, "/static") || r.URL.Path == "/healthz" {
+				h.ServeHTTP(w, r)
+				return
+			}
+
 			tx, err := db.Begin()
 			if err != nil {
 				log.Printf("adminMiddleware.Begin: %s", err)
@@ -3724,6 +4047,16 @@ func main() {
 
 	fs := http.FileServer(http.FS(staticFS))
 	r.Get("/static/*", neuter(fs).ServeHTTP)
+
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if err := db.PingContext(r.Context()); err != nil {
+			log.Printf("healthz.Ping: %s", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("database unreachable"))
+			return
+		}
+		w.Write([]byte("ok"))
+	})
 	r.Route("/", func(r chi.Router) {
 		r.Use(statusMiddleware)
 		r.Get("/", index)
@@ -3919,12 +4252,6 @@ func main() {
 	r.Post("/subscribe/email", postSubscribeEmail)
 	r.Get("/subscribe/email/confirm", getSubscribeEmailConfirm)
 	r.Post("/subscribe/email/confirm", postSubscribeEmailConfirm)
-	r.Post("/test", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("aa") == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	})
-
 	appCtx, cancelAppCtx = context.WithCancel(context.Background())
 
 	shutdownCh := make(chan os.Signal, 1)
@@ -3936,6 +4263,9 @@ func main() {
 	appWg.Add(1)
 	go notificationLoop(appCtx, &appWg)
 
+	appWg.Add(1)
+	go retentionLoop(appCtx, &appWg)
+
 	var httpServer *http.Server
 	var httpsServer *http.Server
 
@@ -3945,9 +4275,14 @@ func main() {
 			log.Fatalf("main.ListenHTTPS: %s", err)
 		}
 
+		// Same timeouts as the release path below; the dev server had none.
 		httpServer = &http.Server{
-			Handler:     r,
-			BaseContext: func(listener net.Listener) context.Context { return appCtx },
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      2 * time.Minute,
+			IdleTimeout:       5 * time.Minute,
+			Handler:           r,
+			BaseContext:       func(listener net.Listener) context.Context { return appCtx },
 		}
 
 		go httpServer.Serve(httpLn)
@@ -3973,7 +4308,7 @@ func main() {
 
 		go httpServer.Serve(httpLn)
 
-		if metaSSL == "true" {
+		if metaSSL.Load() == "true" {
 			certmagic.Default.Storage = &certmagic.FileStorage{Path: "certmagic"}
 			certmagic.DefaultACME.Agreed = true
 			certmagic.DefaultACME.CA = CA
@@ -3981,7 +4316,7 @@ func main() {
 
 			domains := []string{}
 			if domain != "" {
-				domains = append(domains, metaDomain)
+				domains = append(domains, metaDomain.Load())
 			}
 
 			tlsConfig, err := certmagic.TLS(domains)
@@ -4032,18 +4367,28 @@ func main() {
 	}
 
 	<-shutdownCh
-	cancelAppCtx()
-	appWg.Wait()
 
-	if err := httpServer.Shutdown(context.Background()); err != nil {
-		panic(err)
+	// Shutdown BEFORE waiting on the loops: it stops accepting new requests
+	// and drains the ones in flight, where the old order kept the listeners
+	// open while the background loops were already winding down.
+	//
+	// Bounded, because Shutdown with a background context waits forever on a
+	// single hung request and Docker or systemd then SIGKILLs instead.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("main.ShutdownHTTP: %s", err)
 	}
 
 	if httpsServer != nil {
-		if err := httpsServer.Shutdown(context.Background()); err != nil {
-			panic(err)
+		if err := httpsServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("main.ShutdownHTTPS: %s", err)
 		}
 	}
+
+	cancelAppCtx()
+	appWg.Wait()
 
 	err = db.Close()
 	if err != nil {
@@ -4093,6 +4438,10 @@ func listActiveAlertEmailSubscriptions(tx *sql.Tx) ([]AlertSubscription, error) 
 		}
 
 		subs = append(subs, sub)
+	}
+
+	if err := rows.Err(); err != nil {
+		return subs, fmt.Errorf("listActiveAlertEmailSubscriptions.RowsErr: %w", err)
 	}
 
 	return subs, nil
@@ -4262,18 +4611,22 @@ func slackOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func postmarkDeleteSuppression(email string, token string, stream string) error {
-	body := fmt.Sprintf(
-		`
-		{
-			"Suppressions": [
-				{
-					"EmailAddress": "%s"
-				}
-			]
-		}
-		`,
-		email,
-	)
+	// Marshalled, not Sprintf'd: email arrives from an unauthenticated form,
+	// and mail.ParseAddress accepts quoted local parts containing escaped
+	// quotes, which broke straight out of the string literal.
+	bodyBytes, err := json.Marshal(struct {
+		Suppressions []struct {
+			EmailAddress string `json:"EmailAddress"`
+		} `json:"Suppressions"`
+	}{
+		Suppressions: []struct {
+			EmailAddress string `json:"EmailAddress"`
+		}{{EmailAddress: email}},
+	})
+	if err != nil {
+		return fmt.Errorf("postmarkDeleteSuppression.Marshal: %w", err)
+	}
+	body := string(bodyBytes)
 
 	httpClient := http.Client{
 		Timeout: time.Second * 10,
@@ -4478,7 +4831,12 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 				}
 				defer tx.Rollback()
 
-				subscription, err := getAlertSubscriptionByEmail(tx, email)
+				// v.EmailAddress, not email: this loop deactivates the
+				// subscription of each SUPPRESSED address. Looking up the
+				// requester instead meant one subscriber gated the whole dump --
+				// either every suppressed address was deactivated or none was,
+				// depending on whether the person subscribing already had a row.
+				subscription, err := getAlertSubscriptionByEmail(tx, v.EmailAddress)
 				if err != nil {
 					if !errors.Is(err, sql.ErrNoRows) {
 						supressionSyncMu.Unlock()
@@ -4621,15 +4979,28 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 
 	smtpDetail, ok := channel.Details.(SMTPNotificationDetails)
 	if !ok {
-		log.Printf("postSubscribeEmail.NotificationDetailsAssert: %s", err)
+		// err is nil here, so the old "%s" printed %!s(<nil>).
+		log.Printf("postSubscribeEmail.NotificationDetailsAssert: channel %d is not SMTP", channel.ID)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Committed before the SMTP conversation, not after. rwDB is a single
+	// connection opened IMMEDIATE, and net/smtp has no dial timeout, so
+	// holding the transaction across a send to an unreachable host let one
+	// unauthenticated request block every writer -- monitor logging included --
+	// for the OS connect timeout. The pending row is all the confirm flow
+	// needs; the send is best-effort and already logged when it fails.
+	if err := tx.Commit(); err != nil {
+		log.Printf("postSubscribeEmail.Commit: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	msg := [][]byte{
-		[]byte("Subject: Confirm your subscription to " + metaName + " status alerts"),
-		[]byte("To: " + email),
-		[]byte("From: " + metaName + " " + "<" + smtpDetail.From + ">"),
+		[]byte("Subject: Confirm your subscription to " + headerValue(metaName.Load()) + " status alerts"),
+		[]byte("To: " + headerValue(email)),
+		[]byte("From: " + headerValue(metaName.Load()) + " " + "<" + smtpDetail.From + ">"),
 		[]byte("Content-Type: text/html; charset=UTF-8"),
 	}
 	for k, v := range smtpDetail.Headers {
@@ -4637,7 +5008,7 @@ func postSubscribeEmail(w http.ResponseWriter, r *http.Request) {
 			k == "X-PM-Message-Stream" {
 			continue
 		}
-		msg = append(msg, []byte(k+": "+v))
+		msg = append(msg, []byte(headerValue(k)+": "+headerValue(v)))
 	}
 	if strings.EqualFold(smtpDetail.Host, "smtp.postmarkapp.com") {
 		msg = append(msg, []byte("X-PM-Message-Stream: "+smtpDetail.Misc["pm-transactional"]))
@@ -4671,8 +5042,8 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 			Name string
 			Link string
 		}{
-			Name: metaName,
-			Link: protocol + "://" + metaDomain + "/subscribe/email/confirm?token=" + token,
+			Name: metaName.Load(),
+			Link: protocol + "://" + metaDomain.Load() + "/subscribe/email/confirm?token=" + token,
 		},
 	)
 	if err != nil {
@@ -4698,13 +5069,6 @@ If this email reached you by mistake, feel free to ignore it and we won't subscr
 	)
 	if err != nil {
 		log.Printf("postSubscribeEmail.SendMail: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		log.Printf("postSubscribeEmail.Commit: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -4746,14 +5110,25 @@ func getAlertSubscriptionByEmail(tx *sql.Tx, email string) (AlertSubscription, e
 	return sub, nil
 }
 
+// pendingSubscriptionLifetime bounds how long a confirmation link works.
+// Without it the token was replayable forever, and the row it belongs to was
+// never deleted either.
+const pendingSubscriptionLifetime = 24 * time.Hour
+
+// userInvitationLifetime matches the 24h the invitation handlers already
+// enforce when validating a token; expired rows were simply never removed.
+const userInvitationLifetime = 24 * time.Hour
+
 func getPendingEmailAlertSubscriptionEmailByToken(tx *sql.Tx, token string) (string, error) {
 	const query = `
-		select email from pending_email_alert_subscription where token = ? and confirmed_at is null
+		select email from pending_email_alert_subscription
+		where token = ? and confirmed_at is null and created_at > ?
 	`
 
 	var email string
 
-	err := tx.QueryRow(query, token).Scan(&email)
+	err := tx.QueryRow(query, token, time.Now().UTC().Add(-pendingSubscriptionLifetime)).
+		Scan(&email)
 	if err != nil {
 		return email, fmt.Errorf("getPendingEmailAlertSubscriptionEmailByToken.Scan: %w", err)
 	}
@@ -4954,7 +5329,7 @@ func getUnsubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -5024,7 +5399,7 @@ func postUnsubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -5088,7 +5463,7 @@ func postResubscribe(w http.ResponseWriter, r *http.Request) {
 			Token string
 			Ctx   pageCtx
 		}{
-			Name:  metaName,
+			Name:  metaName.Load(),
 			Token: token,
 			Ctx:   getPageCtx(r),
 		},
@@ -5316,7 +5691,7 @@ func postInvitation(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -5371,6 +5746,10 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 		alerts = append(alerts, alert)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErr: %w", err)
+	}
+
 	alertIDs := make([]string, 0, len(alerts))
 	for _, alert := range alerts {
 		alertIDs = append(alertIDs, strconv.Itoa(alert.ID))
@@ -5421,6 +5800,10 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 		messages[alertID] = append(messages[alertID], message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErrMessages: %w", err)
+	}
+
 	serviceQuery := fmt.Sprintf(
 		`
 		select
@@ -5460,10 +5843,17 @@ func getOngoingAlerts(tx *sql.Tx) ([]AlertDetail, error) {
 			return alerts, fmt.Errorf("getOngoingAlerts.Scan3: %w", err)
 		}
 
-		if _, ok := messages[alertID]; !ok {
-			messages[alertID] = []AlertDetailMessage{}
+		// services, not messages: the copy-paste initialised the wrong map, so
+		// an alert with services but no messages was handed an empty Messages
+		// slice and this guard did nothing it was meant to.
+		if _, ok := services[alertID]; !ok {
+			services[alertID] = []AlertDetailService{}
 		}
 		services[alertID] = append(services[alertID], service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getOngoingAlerts.RowsErr: %w", err)
 	}
 
 	for i, alert := range alerts {
@@ -5791,7 +6181,44 @@ func getResolve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Access-Control-Expose-Headers", "X-Statusnook")
 }
 
-var crossAuthTokens = map[string]int{}
+// A cross-auth token mints a full admin session, and it travels in a URL
+// query string -- proxy logs, browser history, Referer. Short-lived and
+// single-use is the only thing keeping that from being a permanent
+// credential lying around in logs.
+const crossAuthTokenTTL = time.Minute
+
+type crossAuthToken struct {
+	userID   int
+	issuedAt time.Time
+}
+
+var crossAuthTokensMu sync.Mutex
+var crossAuthTokens = map[string]crossAuthToken{}
+
+// redeemCrossAuthToken consumes a token, whatever the outcome: a token that
+// was presented once is spent, valid or not.
+func redeemCrossAuthToken(token string) (int, bool) {
+	crossAuthTokensMu.Lock()
+	defer crossAuthTokensMu.Unlock()
+
+	now := time.Now().UTC()
+
+	// Sweep here rather than on a timer: the map only grows when someone
+	// issues a token, and this runs on the path that follows.
+	for k, v := range crossAuthTokens {
+		if now.Sub(v.issuedAt) > crossAuthTokenTTL {
+			delete(crossAuthTokens, k)
+		}
+	}
+
+	v, ok := crossAuthTokens[token]
+	delete(crossAuthTokens, token)
+	if !ok || now.Sub(v.issuedAt) > crossAuthTokenTTL {
+		return 0, false
+	}
+
+	return v.userID, true
+}
 
 func postResolve(w http.ResponseWriter, r *http.Request) {
 	tokenBytes := make([]byte, 32)
@@ -5805,13 +6232,42 @@ func postResolve(w http.ResponseWriter, r *http.Request) {
 	token := base64.URLEncoding.EncodeToString(tokenBytes)
 
 	authCtx := getAuthCtx(r)
-	crossAuthTokens[token] = authCtx.ID
+
+	crossAuthTokensMu.Lock()
+	crossAuthTokens[token] = crossAuthToken{userID: authCtx.ID, issuedAt: time.Now().UTC()}
+	crossAuthTokensMu.Unlock()
 
 	w.Write([]byte(token))
 }
 
+// safeAfterPath keeps the "after" parameter to a path on this host. Anything
+// else is an open redirect: an "@host/x" value terminates the authority's
+// userinfo, so the browser lands on evil.example.com while the URL still
+// opens with the real status domain.
+func safeAfterPath(after string) string {
+	if after == "" {
+		return "/"
+	}
+
+	parsed, err := url.Parse(after)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Opaque != "" {
+		return "/"
+	}
+
+	path := parsed.EscapedPath()
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		return "/"
+	}
+
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+
+	return path
+}
+
 func getCrossAuth(w http.ResponseWriter, r *http.Request) {
-	redirectURL := "https://" + metaDomain + r.URL.Query().Get("after")
+	redirectURL := "https://" + metaDomain.Load() + safeAfterPath(r.URL.Query().Get("after"))
 
 	auth := getAuthCtx(r)
 	if auth.ID != 0 {
@@ -5825,7 +6281,7 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, ok := crossAuthTokens[tokenParam]
+	userID, ok := redeemCrossAuthToken(tokenParam)
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -5870,15 +6326,13 @@ func getCrossAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	delete(crossAuthTokens, tokenParam)
-
 	http.SetCookie(
 		w,
 		&http.Cookie{
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -5908,7 +6362,12 @@ func getOldestAlertDate(tx *sql.Tx) (time.Time, error) {
 	return date, nil
 }
 
-func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
+// periodStart is the first instant of the month being shown; the query bounds
+// on [periodStart, next month) rather than strftime("%Y-%m", created_at) = ?,
+// which is not sargable and made this public page scan the whole alert table.
+func getAlertHistory(tx *sql.Tx, periodStart time.Time) ([]AlertDetail, error) {
+	periodEnd := periodStart.AddDate(0, 1, 0)
+
 	const alertQuery = `
 		select 
 			id,
@@ -5920,13 +6379,13 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		from
 			alert
 		where 
-			strftime("%Y-%m", created_at) = ?
+			created_at >= ? and created_at < ?
 		order by created_at desc
 	`
 
 	alerts := []AlertDetail{}
 
-	rows, err := tx.Query(alertQuery, period)
+	rows, err := tx.Query(alertQuery, periodStart, periodEnd)
 	if err != nil {
 		return alerts, fmt.Errorf("getAlertHistory.Query: %w", err)
 	}
@@ -5947,6 +6406,10 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		}
 
 		alerts = append(alerts, alert)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErr: %w", err)
 	}
 
 	alertIDs := make([]string, 0, len(alerts))
@@ -5999,6 +6462,10 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 		messages[alertID] = append(messages[alertID], message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErrMessages: %w", err)
+	}
+
 	serviceQuery := fmt.Sprintf(
 		`
 		select
@@ -6038,10 +6505,17 @@ func getAlertHistory(tx *sql.Tx, period string) ([]AlertDetail, error) {
 			return alerts, fmt.Errorf("getAlertHistory.Scan3: %w", err)
 		}
 
-		if _, ok := messages[alertID]; !ok {
-			messages[alertID] = []AlertDetailMessage{}
+		// services, not messages: the copy-paste initialised the wrong map, so
+		// an alert with services but no messages was handed an empty Messages
+		// slice and this guard did nothing it was meant to.
+		if _, ok := services[alertID]; !ok {
+			services[alertID] = []AlertDetailService{}
 		}
 		services[alertID] = append(services[alertID], service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("getAlertHistory.RowsErr: %w", err)
 	}
 
 	for i, alert := range alerts {
@@ -6089,7 +6563,7 @@ func history(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alerts, err := getAlertHistory(tx, periodParam)
+	alerts, err := getAlertHistory(tx, periodDate)
 	if err != nil {
 		log.Printf("history.listAlerts: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -6398,6 +6872,17 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func postLogin(w http.ResponseWriter, r *http.Request) {
+	rateLimitKey := loginRateLimitKey(r)
+	if loginRateLimited(rateLimitKey) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`
+			<div id="alert" class="alert" hx-swap-oob="true">
+				Too many failed attempts. Try again later.
+			</div>
+		`))
+		return
+	}
+
 	username := r.PostFormValue("username")
 	if username == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6431,6 +6916,12 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	pwHash, userID, err := getPasswordHash(tx, username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// Hash against a throwaway so an unknown username costs the same
+			// ~60ms as a known one. Returning early made the difference a
+			// clean user-enumeration oracle.
+			bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+
+			recordLoginFailure(rateLimitKey)
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`
 				<div id="alert" class="alert" hx-swap-oob="true">
@@ -6445,6 +6936,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err = bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(password)); err != nil {
+		recordLoginFailure(rateLimitKey)
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`
 			<div id="alert" class="alert" hx-swap-oob="true">
@@ -6453,6 +6945,8 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		`))
 		return
 	}
+
+	clearLoginFailures(rateLimitKey)
 
 	tokenBytes := make([]byte, 32)
 	_, err = rand.Read(tokenBytes)
@@ -6491,7 +6985,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -6543,6 +7037,10 @@ func listAlerts(tx *sql.Tx) ([]AlertListing, error) {
 		}
 
 		alerts = append(alerts, alert)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alerts, fmt.Errorf("listAlerts.RowsErr: %w", err)
 	}
 
 	return alerts, nil
@@ -6746,6 +7244,10 @@ func listMonitors(tx *sql.Tx) ([]Monitor, error) {
 		monitorListings = append(monitorListings, monitor)
 	}
 
+	if err := rows.Err(); err != nil {
+		return monitorListings, fmt.Errorf("listMonitors.RowsErr: %w", err)
+	}
+
 	return monitorListings, nil
 }
 
@@ -6922,6 +7424,10 @@ type MonitorLog struct {
 	MonitorID    int
 }
 
+// monitorPollLimit caps the poll handler's query. High enough that a normal
+// poll never notices; low enough that a crafted cursor cannot ask for a day.
+const monitorPollLimit = 500
+
 func listMonitorLogs(tx *sql.Tx, monitorID int, limit int, after int, before int, date time.Time) ([]MonitorLog, error) {
 	query := `
 		select
@@ -6992,6 +7498,10 @@ func listMonitorLogs(tx *sql.Tx, monitorID int, limit int, after int, before int
 			return monitorLogs, fmt.Errorf("listMonitorLogs.Scan: %w", err)
 		}
 		monitorLogs = append(monitorLogs, monitorLog)
+	}
+
+	if err := rows.Err(); err != nil {
+		return monitorLogs, fmt.Errorf("listMonitorLogs.RowsErr: %w", err)
 	}
 
 	return monitorLogs, nil
@@ -7334,11 +7844,15 @@ func getMonitorAllLogs(w http.ResponseWriter, r *http.Request) {
 
 	afterParam := r.URL.Query().Get("after")
 	if afterParam == "" {
+		// A bare return sends 200 with an empty body, which reads as "no logs"
+		// rather than "you asked wrong".
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	after, err := strconv.Atoi(afterParam)
 	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
@@ -7562,7 +8076,11 @@ func getMonitorPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	monitorLogs, err := listMonitorLogs(tx, id, 0, 0, before, date)
+	// Bounded: limit 0 means "no limit" in listMonitorLogs, and this handler
+	// is polled by the browser every 5s. Normal use returns 0-1 rows, but a
+	// crafted ?before= returned every log for the day -- 8,640 at the minimum
+	// frequency.
+	monitorLogs, err := listMonitorLogs(tx, id, monitorPollLimit, 0, before, date)
 	if err != nil {
 		log.Printf("getMonitorPoll.listMonitorLogs: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -7703,13 +8221,20 @@ func getMonitorPoll(w http.ResponseWriter, r *http.Request) {
 
 func getEditMonitor(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	refreshID := r.URL.Query().Get("refresh")
-	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+
+	// A non-numeric id became 0, which matches no monitor, and the handler
+	// then rendered a page for a monitor that does not exist.
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -8569,7 +9094,7 @@ func updateMonitorSlug(tx *sql.Tx, old string, new string) (int, error) {
 }
 
 func postEditMonitor(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -8648,8 +9173,14 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 	requestHeaders := sql.NullString{}
 	requestHeadersMap := map[string]string{}
 	if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-		for i := range r.Form["header-key"] {
-			requestHeadersMap[r.Form["header-key"][i]] = r.Form["header-value"][i]
+		// PostForm, not Form: Form merges the query string in, so
+		// ?header-key=x on the URL injected an entry and skewed the two
+		// slices against each other. Bounded by the shorter of the two --
+		// indexing values by the keys' length panicked on any mismatch.
+		keys := r.PostForm["header-key"]
+		values := r.PostForm["header-value"]
+		for i := 0; i < len(keys) && i < len(values); i++ {
+			requestHeadersMap[keys[i]] = values[i]
 		}
 	}
 	requestHeadersSerialized, err := json.Marshal(requestHeadersMap)
@@ -8683,8 +9214,10 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 
 	if r.PostFormValue("form-key") != "" && r.PostFormValue("form-value") != "" {
 		urlValues := url.Values{}
-		for i := 0; i < len(r.Form["form-key"]); i++ {
-			urlValues.Add(r.Form["form-key"][i], r.Form["form-value"][i])
+		formKeys := r.PostForm["form-key"]
+		formValues := r.PostForm["form-value"]
+		for i := 0; i < len(formKeys) && i < len(formValues); i++ {
+			urlValues.Add(formKeys[i], formValues[i])
 		}
 		body = sql.NullString{
 			Valid:  true,
@@ -8799,7 +9332,20 @@ func deleteMonitorByID(tx *sql.Tx, id int) error {
 }
 
 func deleteMonitor(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.Atoi(chi.URLParam(r, "id"))
+	// Every create and edit handler has this gate; the four delete handlers
+	// did not, so config-file mode hid the buttons while the routes still
+	// worked -- and under GitHub-managed config the deleted entity does not
+	// come back, because the webhook skips a config whose SHA is unchanged.
+	if metaConfigFileEnabled.Load() {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	tx, err := rwDB.Begin()
 	if err != nil {
@@ -9548,7 +10094,7 @@ func createMonitor(
 }
 
 func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -9627,8 +10173,14 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 	requestHeaders := sql.NullString{}
 	requestHeadersMap := map[string]string{}
 	if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-		for i := range r.Form["header-key"] {
-			requestHeadersMap[r.Form["header-key"][i]] = r.Form["header-value"][i]
+		// PostForm, not Form: Form merges the query string in, so
+		// ?header-key=x on the URL injected an entry and skewed the two
+		// slices against each other. Bounded by the shorter of the two --
+		// indexing values by the keys' length panicked on any mismatch.
+		keys := r.PostForm["header-key"]
+		values := r.PostForm["header-value"]
+		for i := 0; i < len(keys) && i < len(values); i++ {
+			requestHeadersMap[keys[i]] = values[i]
 		}
 	}
 	requestHeadersSerialized, err := json.Marshal(requestHeadersMap)
@@ -9654,8 +10206,10 @@ func postCreateMonitor(w http.ResponseWriter, r *http.Request) {
 
 	if r.PostFormValue("form-key") != "" && r.PostFormValue("form-value") != "" {
 		urlValues := url.Values{}
-		for i := 0; i < len(r.Form["form-key"]); i++ {
-			urlValues.Add(r.Form["form-key"][i], r.Form["form-value"][i])
+		formKeys := r.PostForm["form-key"]
+		formValues := r.PostForm["form-value"]
+		for i := 0; i < len(formKeys) && i < len(formValues); i++ {
+			urlValues.Add(formKeys[i], formValues[i])
 		}
 		body = sql.NullString{
 			Valid:  true,
@@ -9843,6 +10397,10 @@ func getAlertByID(tx *sql.Tx, id int) (AlertDetail, error) {
 		alert.Messages = append(alert.Messages, message)
 	}
 
+	if err := rows.Err(); err != nil {
+		return alert, fmt.Errorf("getAlertByID.RowsErr: %w", err)
+	}
+
 	const serviceQuery = `
 		select
 			service.id,
@@ -9874,6 +10432,10 @@ func getAlertByID(tx *sql.Tx, id int) (AlertDetail, error) {
 		}
 
 		alert.Services = append(alert.Services, service)
+	}
+
+	if err := rows.Err(); err != nil {
+		return alert, fmt.Errorf("getAlertByID.RowsErr: %w", err)
 	}
 
 	return alert, nil
@@ -9917,6 +10479,10 @@ func getAlertSettings(tx *sql.Tx) (AlertSettings, error) {
 			}
 			settings.ManagedSubscriptions = parsedV
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return settings, fmt.Errorf("getAlertSettings.RowsErr: %w", err)
 	}
 
 	return settings, nil
@@ -10256,8 +10822,8 @@ func getAlertNotifications(w http.ResponseWriter, r *http.Request) {
 		Notifications:           notifications,
 		Settings:                settings,
 		SMTPNotificationChannel: smtpNotificationChannelID,
-		Domain:                  metaDomain,
-		ConfigFileEnabled:       metaConfigFileEnabled,
+		Domain:                  metaDomain.Load(),
+		ConfigFileEnabled:       metaConfigFileEnabled.Load(),
 		Ctx:                     getPageCtx(r),
 	})
 	if err != nil {
@@ -10319,7 +10885,7 @@ func updateAlertSMTPNotificationSetting(tx *sql.Tx, notificationID int) error {
 }
 
 func postAlertNotifications(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12017,6 +12583,10 @@ func listServices(tx *sql.Tx) ([]service, error) {
 		services = append(services, svc)
 	}
 
+	if err := rows.Err(); err != nil {
+		return services, fmt.Errorf("listServices.RowsErr: %w", err)
+	}
+
 	return services, nil
 }
 
@@ -12210,7 +12780,7 @@ func createService(tx *sql.Tx, slug string, name string, helperText string) erro
 }
 
 func postCreateService(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12274,6 +12844,11 @@ func deleteServiceByID(tx *sql.Tx, id int) error {
 }
 
 func deleteService(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled.Load() {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -12290,7 +12865,11 @@ func deleteService(w http.ResponseWriter, r *http.Request) {
 
 	err = deleteServiceByID(tx, id)
 	if err != nil {
+		// Without the return this committed an empty transaction and
+		// redirected as though the delete had worked.
 		log.Printf("deleteService.deleteServiceByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	err = tx.Commit()
@@ -12324,7 +12903,7 @@ func getServiceByID(tx *sql.Tx, id int) (service, error) {
 
 func getEditService(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -12443,7 +13022,7 @@ func updateServiceSlug(tx *sql.Tx, old string, new string) (int, error) {
 }
 
 func postEditService(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -13148,6 +13727,10 @@ func listNotificationChannels(tx *sql.Tx, options listNotificationsOptions) ([]N
 		channels = append(channels, channel)
 	}
 
+	if err := rows.Err(); err != nil {
+		return channels, fmt.Errorf("listNotificationChannels.RowsErr: %w", err)
+	}
+
 	return channels, nil
 }
 
@@ -13201,6 +13784,10 @@ func listNotificationChannelsByMonitorID(tx *sql.Tx, monitorID int) ([]Notificat
 		notifications = append(notifications, channel)
 	}
 
+	if err := rows.Err(); err != nil {
+		return notifications, fmt.Errorf("listNotificationChannelsByMonitorID.RowsErr: %w", err)
+	}
+
 	return notifications, nil
 }
 
@@ -13224,7 +13811,7 @@ func createNotification(
 }
 
 func postCreateNotification(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -13285,8 +13872,10 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 
 		headers := map[string]string{}
 		if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-			for i := 0; i < len(r.Form["header-key"]); i++ {
-				headers[r.Form["header-key"][i]] = r.Form["header-value"][i]
+			keys := r.PostForm["header-key"]
+			values := r.PostForm["header-value"]
+			for i := 0; i < len(keys) && i < len(values); i++ {
+				headers[keys[i]] = values[i]
 			}
 		}
 
@@ -13361,7 +13950,10 @@ func postCreateNotification(w http.ResponseWriter, r *http.Request) {
 	} else if notificationType == "slack" {
 		webhookURL, err := url.ParseRequestURI(r.PostFormValue("webhook-url"))
 		if err != nil {
+			// ParseRequestURI returns a nil URL alongside the error, and the
+			// code below calls String() on it.
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
 		tx, err := rwDB.Begin()
@@ -13505,7 +14097,7 @@ func getNotificationChannelBySlug(tx *sql.Tx, slug string) (NotificationChannel,
 
 func getEditNotification(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -13951,7 +14543,7 @@ func updateNotificationChannelSlug(tx *sql.Tx, old string, new string) (int, err
 }
 
 func postEditNotification(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14028,8 +14620,10 @@ func postEditNotification(w http.ResponseWriter, r *http.Request) {
 
 		headers := map[string]string{}
 		if r.PostFormValue("header-key") != "" && r.PostFormValue("header-value") != "" {
-			for i := 0; i < len(r.Form["header-key"]); i++ {
-				headers[r.Form["header-key"][i]] = r.Form["header-value"][i]
+			keys := r.PostForm["header-key"]
+			values := r.PostForm["header-value"]
+			for i := 0; i < len(keys) && i < len(values); i++ {
+				headers[keys[i]] = values[i]
 			}
 		}
 
@@ -14081,7 +14675,10 @@ func postEditNotification(w http.ResponseWriter, r *http.Request) {
 	} else if channel.Type == "slack" {
 		webhookURL, err := url.ParseRequestURI(r.PostFormValue("webhook-url"))
 		if err != nil {
+			// ParseRequestURI returns a nil URL alongside the error, and the
+			// code below calls String() on it.
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 
 		details := SlackNotificationDetails{
@@ -14139,6 +14736,11 @@ func deleteNotificationChannelByID(tx *sql.Tx, id int) error {
 }
 
 func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled.Load() {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -14156,6 +14758,8 @@ func deleteNotificationChannel(w http.ResponseWriter, r *http.Request) {
 	err = deleteNotificationChannelByID(tx, id)
 	if err != nil {
 		log.Printf("deleteNotificationChannel.deleteNotificationChannelByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	err = tx.Commit()
@@ -14311,7 +14915,7 @@ func getCreateMailGroup(w http.ResponseWriter, r *http.Request) {
 
 func getEditMailGroup(w http.ResponseWriter, r *http.Request) {
 	readOnly := strings.HasSuffix(r.URL.Path, "view")
-	if !readOnly && metaConfigFileEnabled {
+	if !readOnly && metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14577,6 +15181,10 @@ func listMailGroups(tx *sql.Tx) ([]MailGroup, error) {
 		mailGroups = append(mailGroups, mailGroup)
 	}
 
+	if err := rows.Err(); err != nil {
+		return mailGroups, fmt.Errorf("listMailGroups.RowsErr: %w", err)
+	}
+
 	return mailGroups, nil
 }
 
@@ -14646,6 +15254,10 @@ func listMailGroupIDsByMonitorID(tx *sql.Tx, monitorID int) ([]MailGroupIDs, err
 		allIds = append(allIds, ids)
 	}
 
+	if err := rows.Err(); err != nil {
+		return allIds, fmt.Errorf("listMailGroupIDsByMonitorID.RowsErr: %w", err)
+	}
+
 	return allIds, nil
 }
 
@@ -14677,6 +15289,10 @@ func listMailGroupMembersByID(tx *sql.Tx, id int) ([]MailGroupMember, error) {
 		members = append(members, member)
 	}
 
+	if err := rows.Err(); err != nil {
+		return members, fmt.Errorf("listMailGroupMembersByID.RowsErr: %w", err)
+	}
+
 	return members, nil
 }
 
@@ -14704,6 +15320,10 @@ func listMailGroupMembersEmailsByMonitorID(tx *sql.Tx, id int) ([]string, error)
 		}
 
 		emails = append(emails, email)
+	}
+
+	if err := rows.Err(); err != nil {
+		return emails, fmt.Errorf("listMailGroupMembersEmailsByMonitorID.RowsErr: %w", err)
 	}
 
 	return emails, nil
@@ -14810,7 +15430,7 @@ func updateMailGroupMembers(tx *sql.Tx, id int, members []string) error {
 }
 
 func postCreateMailGroup(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -14891,6 +15511,11 @@ func deleteMailGroupByID(tx *sql.Tx, id int) error {
 }
 
 func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
+	if metaConfigFileEnabled.Load() {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -14923,7 +15548,7 @@ func deleteMailGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func postEditMailGroup(w http.ResponseWriter, r *http.Request) {
-	if metaConfigFileEnabled {
+	if metaConfigFileEnabled.Load() {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -15064,6 +15689,15 @@ func updateCheck(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("updateCheck.ReadAll: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// A 403 rate-limit body unmarshals cleanly into an empty release, whose
+	// blank tag semver.Compare ranks below any real version -- so a failed
+	// check rendered as "Statusnook is up to date".
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("updateCheck.StatusCode %d: %s", resp.StatusCode, string(body))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -15249,6 +15883,12 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("postUpdate.StatusCode %d: %s", resp.StatusCode, string(body))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	type GitHubReleaseAsset struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
@@ -15297,7 +15937,17 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	downloadReq.Header.Add("Accept", "application/octet-stream")
 
-	resp, err = httpClient.Do(downloadReq)
+	// Its own client: httpClient's 10s Timeout is a whole-request deadline
+	// that covers the body read, so it aborted the copy partway through a
+	// multi-megabyte binary on any link slower than ~2 MB/s.
+	downloadClient := http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+		},
+	}
+
+	resp, err = downloadClient.Do(downloadReq)
 	if err != nil {
 		log.Printf("postUpdate.DoDownload: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -15305,34 +15955,56 @@ func postUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	err = os.Remove("statusnook")
-	if err != nil {
-		log.Printf("postUpdate.Remove: %s", err)
+	// The status was never checked, so a 403 rate-limit body was written over
+	// the binary, chmod 0700, and the process then SIGINT'd itself into a
+	// restart loop on a JSON file.
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("postUpdate.DownloadStatusCode: %d", resp.StatusCode)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	file, err := os.Create("statusnook")
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("postUpdate.Executable: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Download beside the binary, then rename over it. os.Remove first left
+	// nothing to fall back to the moment anything after it failed, and rename
+	// within a directory is atomic.
+	tmpPath := exePath + ".new"
+
+	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0700)
 	if err != nil {
 		log.Printf("postUpdate.Create: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = file.Chmod(0700)
-	if err != nil {
-		log.Printf("postUpdate.Chmod: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
+		file.Close()
+		os.Remove(tmpPath)
 		log.Printf("postUpdate.Copy: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	file.Close()
+
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Close: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		os.Remove(tmpPath)
+		log.Printf("postUpdate.Rename: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	const markup = `
 		<div 
@@ -16032,7 +16704,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 			Ctx                 pageCtx
 		}{
 			CurrentVersion:      VERSION,
-			Domain:              metaDomain,
+			Domain:              metaDomain.Load(),
 			Users:               users,
 			Invitations:         formattedInvitations,
 			Refresh:             refresh,
@@ -16058,7 +16730,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 	domain := strings.ToLower(r.PostFormValue("domain"))
 
 	if name != "" {
-		if metaConfigFileEnabled {
+		if metaConfigFileEnabled.Load() {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -16084,9 +16756,9 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		metaName = name
+		metaName.Store(name)
 
-		escapedName := html.EscapeString(metaName)
+		escapedName := html.EscapeString(metaName.Load())
 
 		w.Write([]byte(
 			fmt.Sprintf(`
@@ -16102,7 +16774,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if domain != "" {
-		if metaSSL != "true" {
+		if metaSSL.Load() != "true" {
 			tx, err := rwDB.Begin()
 			if err != nil {
 				log.Printf("postSettings.BeginUnmanagedDomain: %s", err)
@@ -16146,13 +16818,13 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			metaDomain = domain
+			metaDomain.Store(domain)
 
 			w.Header().Add("HX-Location", "/admin/settings")
 			return
 		}
 
-		if metaDomain == "" {
+		if metaDomain.Load() == "" {
 			tx, err := rwDB.Begin()
 			if err != nil {
 				log.Printf("postSettings.BeginUnconfirmedDomainUpdate: %s", err)
@@ -16195,7 +16867,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			metaUnconfirmedDomain = domain
+			metaUnconfirmedDomain.Store(domain)
 		}
 
 		domainPattern := regexp.MustCompile(`^[a-z0-9]+(?:[\-.][a-z0-9]+)*\.[a-z]+$`)
@@ -16248,7 +16920,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			notFoundMsg := "We didn't find your domain's A record, verify it exists and then retry. " +
 				"If your domain and A record is correct, you might need to wait a few minutes before retrying."
 
-			if metaDomain == "" {
+			if metaDomain.Load() == "" {
 				tx, err := rwDB.Begin()
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblemNotFound: %s", err)
@@ -16291,7 +16963,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				metaUnconfirmedDomainProblem = notFoundMsg
+				metaUnconfirmedDomainProblem.Store(notFoundMsg)
 			}
 
 			w.WriteHeader(http.StatusBadRequest)
@@ -16323,7 +16995,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 				log.Printf("postSettings.attemptCertificateAcquisition: %s", err)
 			}
 
-			if metaDomain == "" {
+			if metaDomain.Load() == "" {
 				tx, err := rwDB.Begin()
 				if err != nil {
 					log.Printf("postSettings.BeginUnconfirmedDomainProblem: %s", err)
@@ -16366,7 +17038,7 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				metaUnconfirmedDomainProblem = errMsg
+				metaUnconfirmedDomainProblem.Store(errMsg)
 			}
 
 			if errMsg == "An unexpected error occurred" {
@@ -16457,9 +17129,9 @@ func postSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		metaDomain = domain
-		metaUnconfirmedDomain = ""
-		metaUnconfirmedDomainProblem = ""
+		metaDomain.Store(domain)
+		metaUnconfirmedDomain.Store("")
+		metaUnconfirmedDomainProblem.Store("")
 
 		w.Header().Add("HX-Location", "/admin/settings")
 	}
@@ -16490,7 +17162,7 @@ func postSettingsCancelDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaUnconfirmedDomainProblem = v
+	metaUnconfirmedDomainProblem.Store(v)
 
 	w.Header().Add("HX-Location", "/admin/settings")
 }
@@ -16772,6 +17444,10 @@ func listActiveUserInvitations(tx *sql.Tx, minTime time.Time) ([]UserInvitation,
 		}
 
 		invs = append(invs, inv)
+	}
+
+	if err := rows.Err(); err != nil {
+		return invs, fmt.Errorf("listActiveUserInvitations.RowsErr: %w", err)
 	}
 
 	return invs, nil
@@ -17324,7 +18000,7 @@ func getConfigSettings(w http.ResponseWriter, r *http.Request) {
 		GitHubConfigPath:    githubFilePath,
 		GitHubToken:         githubToken,
 		GitHubWebhookSecret: githubWebhookSecret,
-		Domain:              metaDomain,
+		Domain:              metaDomain.Load(),
 		Ctx:                 getPageCtx(r),
 	})
 	if err != nil {
@@ -17388,12 +18064,14 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if parsedRepoURL.Path == "" {
+			// WriteHeader has to precede Write; the other order sent 200 and
+			// logged "superfluous response.WriteHeader call".
+			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`
 				<div id="alert" class="alert" hx-swap-oob="true">
 					Invalid GitHub repository URL
 				</div>`,
 			))
-			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
@@ -17571,7 +18249,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !metaConfigFileEnabled && configFile {
+	if !metaConfigFileEnabled.Load() && configFile {
 		cfg, err := generateConfig(tx)
 		if err != nil {
 			log.Printf("postConfigSettings.generateConfig: %s", err)
@@ -17594,7 +18272,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaConfigFileEnabled = configFile
+	metaConfigFileEnabled.Store(configFile)
 
 	w.Header().Add("HX-Location", "/admin/settings")
 }
@@ -17630,6 +18308,11 @@ func postGenerateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func configWebhook(w http.ResponseWriter, r *http.Request) {
+	// Public route, and the whole body is buffered before the signature is
+	// checked. GitHub caps webhook payloads at 25 MB; without a cap here an
+	// unauthenticated client streams until the 30s read timeout, repeatedly.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	tx, err := db.Begin()
 	if err != nil {
 		log.Printf("configWebhook.BeginRead: %s", err)
@@ -17764,7 +18447,9 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, err := io.ReadAll(r.Body)
+		// resp, not r: the request body was drained long ago, so reading it
+		// here logged an empty string and threw away GitHub's reason.
+		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("configWebhook.ReadAllNon200: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -17772,7 +18457,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if string(respBody) != "" {
-			log.Printf("configWebhook.StatusCode: %s", string(respBody))
+			log.Printf("configWebhook.StatusCode %d: %s", resp.StatusCode, string(respBody))
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -17813,7 +18498,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		msgs, err := applyConfig(tx, content)
 		if err != nil {
 			unwrappedErr := errors.Unwrap(err)
-			if !strings.HasPrefix(unwrappedErr.Error(), "yaml:") {
+			if unwrappedErr == nil || !strings.HasPrefix(unwrappedErr.Error(), "yaml:") {
 				log.Printf("configWebhook.applyConfig: %s", err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
@@ -17832,6 +18517,51 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			configErrors = string(msgsBytes)
+
+			// applyConfig writes as it validates, deletes included, so by the
+			// time one bad monitor produces a message the services, channels
+			// and monitors the file no longer mentions are already gone. Throw
+			// the whole apply away and record only the errors, the way the
+			// admin editor path does. githubConfigSHA deliberately stays
+			// unchanged so a corrected push re-applies instead of being
+			// skipped as already-seen.
+			if err := tx.Rollback(); err != nil {
+				log.Printf("configWebhook.RollbackInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			errTx, err := rwDB.Begin()
+			if err != nil {
+				log.Printf("configWebhook.BeginInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			defer errTx.Rollback()
+
+			if err := updateMetaValue(errTx, "githubConfigErrors", configErrors); err != nil {
+				log.Printf("configWebhook.updateMetaValueGitHubConfigErrorsInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			if err := updateMetaValue(errTx, "configFile", string(content)); err != nil {
+				log.Printf("configWebhook.updateMetaValueConfigFileInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			if err := errTx.Commit(); err != nil {
+				log.Printf("configWebhook.CommitInvalid: %s", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			// 422 rather than 200: GitHub records the response in the webhook
+			// delivery log, which is the only place a pusher looks.
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			w.Write(msgsBytes)
+			return
 		}
 
 		err = updateMetaValue(tx, "githubConfigErrors", string(configErrors))
@@ -17858,7 +18588,10 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Fatalf("configWebhook.getMetaValueName: %s", err)
+		// log.Fatalf here let any DB error on a webhook GitHub delivers kill
+		// the process outright, abandoning the open write transaction.
+		log.Printf("configWebhook.getMetaValueName: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -17869,7 +18602,7 @@ func configWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
+	metaName.Store(name)
 }
 
 func postConfig(w http.ResponseWriter, r *http.Request) {
@@ -17965,7 +18698,8 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 
 	name, err := getMetaValue(tx, "name")
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Fatalf("postConfig.getMetaValueSetupName: %s", err)
+		log.Printf("postConfig.getMetaValueSetupName: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -17976,7 +18710,7 @@ func postConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
+	metaName.Store(name)
 
 	w.Write(
 		[]byte(
@@ -18106,12 +18840,18 @@ func postSecret(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sessionLifetime is how long a session token stays valid. Sessions used to
+// carry no timestamp and the cookie was set to expire in 100 years, so a token
+// recovered from a backup or an old browser profile was a permanent admin
+// credential.
+const sessionLifetime = 30 * 24 * time.Hour
+
 func createSession(tx *sql.Tx, token string, csrfToken string, userID int) error {
 	const query = `
-		insert into session(token, csrf_token, user_id) values(?, ?, ?)
+		insert into session(token, csrf_token, created_at, user_id) values(?, ?, ?, ?)
 	`
 
-	_, err := tx.Exec(query, token, csrfToken, userID)
+	_, err := tx.Exec(query, token, csrfToken, time.Now().UTC(), userID)
 	if err != nil {
 		return fmt.Errorf("createSession.Exec: %w", err)
 	}
@@ -18124,12 +18864,13 @@ func validateSession(tx *sql.Tx, token string) (int, string, error) {
 		select user.id, session.csrf_Token
 		from user
 		left join session on session.user_id = user.id
-		where session.token = ?
+		where session.token = ? and session.created_at > ?
 	`
 
 	userID := 0
 	csrfToken := ""
-	err := tx.QueryRow(query, token).Scan(&userID, &csrfToken)
+	err := tx.QueryRow(query, token, time.Now().UTC().Add(-sessionLifetime)).
+		Scan(&userID, &csrfToken)
 	if err != nil {
 		return userID, csrfToken, err
 	}
@@ -18163,6 +18904,10 @@ func listUsers(tx *sql.Tx) ([]SettingsUser, error) {
 		}
 
 		users = append(users, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		return users, fmt.Errorf("listUsers.RowsErr: %w", err)
 	}
 
 	return users, nil
@@ -18453,7 +19198,7 @@ func getSetupDomain(w http.ResponseWriter, r *http.Request) {
 			Ctx            map[string]string
 		}{
 			DEV:            template.JS(dev),
-			SSL:            metaSSL,
+			SSL:            metaSSL.Load(),
 			PrefillURLText: prefillURLText,
 			Ctx:            map[string]string{},
 		},
@@ -18463,6 +19208,27 @@ func getSetupDomain(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+}
+
+// randomNS picks one NS record from an authority section. The section is not
+// guaranteed to hold any: an authoritative NOERROR answer carries none, and a
+// NODATA answer carries an SOA. Indexing it blind panicked twice over --
+// mathRand.Intn(0), and an unchecked assertion on *dns.SOA -- and one caller
+// is monitorUnconfirmedDomainLoop, a bare goroutine where a panic takes the
+// process with it.
+func randomNS(section []dns.RR) (string, bool) {
+	nsRecords := []*dns.NS{}
+	for _, rr := range section {
+		if ns, ok := rr.(*dns.NS); ok {
+			nsRecords = append(nsRecords, ns)
+		}
+	}
+
+	if len(nsRecords) == 0 {
+		return "", false
+	}
+
+	return nsRecords[mathRand.Intn(len(nsRecords))].Ns, true
 }
 
 func lookupDomain(domain string) (bool, error) {
@@ -18495,7 +19261,10 @@ func lookupDomain(domain string) (bool, error) {
 		return false, nil
 	}
 
-	authorityNS := r.Ns[mathRand.Intn(len(r.Ns))].(*dns.NS).Ns
+	authorityNS, ok := randomNS(r.Ns)
+	if !ok {
+		return false, nil
+	}
 	m = &dns.Msg{}
 	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.SetEdns0(4096, false)
@@ -18507,7 +19276,10 @@ func lookupDomain(domain string) (bool, error) {
 		return false, nil
 	}
 
-	domainNS := r.Ns[mathRand.Intn(len(r.Ns))].(*dns.NS).Ns
+	domainNS, ok := randomNS(r.Ns)
+	if !ok {
+		return false, nil
+	}
 	m = &dns.Msg{}
 	m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 	m.SetEdns0(4096, false)
@@ -18572,7 +19344,7 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if BUILD == "release" && metaSSL == "true" {
+	if BUILD == "release" && metaSSL.Load() == "true" {
 		found, err := lookupDomain(domainParam)
 		if err != nil {
 			log.Printf("postSetupDomain.lookupDomain: %s", err)
@@ -18686,10 +19458,10 @@ func postSetupDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "account"
-	metaDomain = domainParam
+	metaSetup.Store("account")
+	metaDomain.Store(domainParam)
 
-	if BUILD == "dev" || metaSSL == "false" {
+	if BUILD == "dev" || metaSSL.Load() == "false" {
 		w.Header().Add("HX-Location", "/setup/account")
 	}
 }
@@ -18736,8 +19508,8 @@ func postSetupDomainSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "account"
-	metaUnconfirmedDomain = domainParam
+	metaSetup.Store("account")
+	metaUnconfirmedDomain.Store(domainParam)
 
 	appWg.Add(1)
 	go monitorUnconfirmedDomainLoop(appCtx, &appWg)
@@ -18986,7 +19758,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaSetup = "name"
+	metaSetup.Store("name")
 
 	http.SetCookie(
 		w,
@@ -18994,7 +19766,7 @@ func postSetupAccount(w http.ResponseWriter, r *http.Request) {
 			Name:     "session",
 			Value:    token,
 			Path:     "/",
-			Expires:  time.Now().UTC().Add(time.Hour * 876600),
+			Expires:  time.Now().UTC().Add(sessionLifetime),
 			Secure:   BUILD == "release",
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
@@ -19090,8 +19862,8 @@ func postSetupName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaName = name
-	metaSetup = "done"
+	metaName.Store(name)
+	metaSetup.Store("done")
 
 	w.Header().Add("HX-Location", "/")
 }
