@@ -150,4 +150,3 @@ var getSetupAccountMarkup string
 
 //go:embed templates/get_setup_name.html
 var getSetupNameMarkup string
-
