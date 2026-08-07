@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -24,7 +25,9 @@ type testApp struct {
 	csrfToken string
 }
 
-func withTestApp(t *testing.T) *testApp {
+// A brand new instance, exactly as a first boot leaves it: schema.sql's
+// setup=domain, no account, nobody logged in. TestSetupFlow drives it forward.
+func newTestApp(t *testing.T) *testApp {
 	t.Helper()
 
 	// initDB writes statusnook-data/ relative to the working directory.
@@ -43,23 +46,21 @@ func withTestApp(t *testing.T) *testApp {
 		db, rwDB = previousDB, previousRWDB
 	})
 
+	// Handlers that start a background loop hand it these; nil would panic.
+	previousCtx, previousCancel := appCtx, cancelAppCtx
+	appCtx, cancelAppCtx = context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancelAppCtx()
+		appWg.Wait()
+		appCtx, cancelAppCtx = previousCtx, previousCancel
+	})
+
 	tx, err := rwDB.Begin()
 	require.NoError(t, err)
 	require.NoError(t, loadMetaState(tx, "false"))
-	require.NoError(t, updateMetaValue(tx, "setup", "done"))
-	require.NoError(t, updateMetaValue(tx, "name", "Test Status"))
-
-	// The instance is past setup, so the redirect middleware lets requests
-	// through and the config-file gate is off (it 400s every mutating route).
-	metaSetup.Store("done")
-	metaName.Store("Test Status")
-	metaConfigFileEnabled.Store(false)
-
-	hash, err := bcrypt.GenerateFromPassword([]byte("hunter2hunter2"), bcrypt.MinCost)
-	require.NoError(t, err)
-	_, err = createUser(tx, "admin", string(hash))
-	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
+
+	metaConfigFileEnabled.Store(false)
 
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
@@ -76,6 +77,31 @@ func withTestApp(t *testing.T) *testApp {
 		},
 	}
 	t.Cleanup(app.server.Close)
+
+	return app
+}
+
+func withTestApp(t *testing.T) *testApp {
+	t.Helper()
+
+	app := newTestApp(t)
+
+	tx, err := rwDB.Begin()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	// Past setup, so the redirect middleware lets requests through.
+	require.NoError(t, updateMetaValue(tx, "setup", "done"))
+	require.NoError(t, updateMetaValue(tx, "name", "Test Status"))
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("hunter2hunter2"), bcrypt.MinCost)
+	require.NoError(t, err)
+	_, err = createUser(tx, "admin", string(hash))
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	metaSetup.Store("done")
+	metaName.Store("Test Status")
 
 	app.login()
 
