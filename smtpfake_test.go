@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"math/big"
 	"net"
 	"os"
@@ -109,9 +110,7 @@ func newFakeSMTP(t *testing.T) *fakeSMTP {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("newFakeSMTP.Listen: %s", err)
-	}
+	require.Nil(t, err)
 
 	s := &fakeSMTP{t: t, listener: listener, port: listener.Addr().(*net.TCPAddr).Port}
 	t.Cleanup(func() { listener.Close() })

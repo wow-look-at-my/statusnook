@@ -26,18 +26,17 @@ func runMonitorLoopUntil(t *testing.T, done func() bool) {
 	wg.Add(1)
 	go monitorLoop(ctx, &wg)
 
-	deadline := time.Now().Add(10 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			cancel()
-			wg.Wait()
-			t.Fatal("monitor loop never produced the expected state")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// Deferred, not written out after the wait: require.Eventually ends the
+	// test with runtime.Goexit on failure, which runs defers but not the lines
+	// below it -- and a monitor loop left running would keep writing into a
+	// database the next test is about to swap out.
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 
-	cancel()
-	wg.Wait()
+	require.Eventually(t, done, 10*time.Second, 20*time.Millisecond,
+		"the monitor loop never produced the expected state")
 }
 
 func TestMonitorLoopLogsASuccessfulCheck(t *testing.T) {
