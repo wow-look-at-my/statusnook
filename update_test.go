@@ -84,3 +84,25 @@ func TestPostUpdateStopsBeforeDownloadingWhenItShould(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, app.post("/admin/update", nil).status,
 		"no asset for this platform is a failure, not a silent no-op")
 }
+
+// GitHub being unreachable, or answering with something that is not a release,
+// is a failed check -- never a quiet "up to date".
+func TestUpdateCheckFailsWhenGitHubIsUnusable(t *testing.T) {
+	app := withTestApp(t)
+
+	previous := githubAPIBaseURL
+	githubAPIBaseURL = "http://127.0.0.1:1"
+	t.Cleanup(func() { githubAPIBaseURL = previous })
+
+	require.Equal(t, http.StatusInternalServerError, app.get("/admin/update/check").status)
+	require.Equal(t, http.StatusInternalServerError, app.post("/admin/update", nil).status)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not json"))
+	}))
+	t.Cleanup(server.Close)
+	githubAPIBaseURL = server.URL
+
+	require.Equal(t, http.StatusInternalServerError, app.get("/admin/update/check").status)
+	require.Equal(t, http.StatusInternalServerError, app.post("/admin/update", nil).status)
+}

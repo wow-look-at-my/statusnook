@@ -89,3 +89,65 @@ func TestGenerateSelfSignedCertificateWritesAUsablePair(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, info.Mode().Perm()&0077, "the private key must not be world or group readable")
 }
+
+// With TLS on the domain has to be one a certificate could be issued for, so
+// the form rejects the three shapes people actually type before it goes
+// anywhere near DNS.
+func TestSettingsValidatesTheDomainWhenTLSIsOn(t *testing.T) {
+	app := withTestApp(t)
+
+	metaSSL.Store("true")
+	t.Cleanup(func() { metaSSL.Store("false") })
+	metaDomain.Store("")
+	t.Cleanup(func() { metaDomain.Store("") })
+
+	for _, bad := range []string{
+		"https://status.example.com", "192.0.2.1", "2001:db8::1", "not_a_domain",
+	} {
+		require.Equal(t, http.StatusBadRequest,
+			app.post("/admin/settings", url.Values{"domain": {bad}}).status,
+			"domain %q was accepted", bad)
+	}
+
+	// The pending domain is recorded before any of that, so the settings page
+	// has something to show while the check is outstanding.
+	require.Equal(t, "not_a_domain", metaUnconfirmedDomain.Load())
+	require.Equal(t, "not_a_domain", app.metaValue("unconfirmedDomain"))
+
+	// Once a domain is live the pending one is left alone -- the instance is
+	// already reachable at the old name until the new one is proved.
+	metaDomain.Store("status.example.com")
+	require.Equal(t, http.StatusBadRequest,
+		app.post("/admin/settings", url.Values{"domain": {"still_wrong"}}).status)
+	require.Equal(t, "not_a_domain", metaUnconfirmedDomain.Load())
+}
+
+// The pending-domain write is the one database write on the TLS path that
+// happens before anything is proved, so its failures have to surface.
+func TestSettingsDomainSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+
+	metaSSL.Store("true")
+	t.Cleanup(func() { metaSSL.Store("false") })
+	metaDomain.Store("")
+	t.Cleanup(func() { metaDomain.Store("") })
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 20; depth++ {
+		failAtStatement(depth)
+		resp := app.post("/admin/settings", url.Values{"domain": {"not_a_domain"}})
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"settings answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/admin/settings").status)
+}

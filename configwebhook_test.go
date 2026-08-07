@@ -251,3 +251,64 @@ func (a *testApp) metaValue(name string) string {
 
 	return value
 }
+
+// The delivery's own fetch of the config, and the two ways that fetch can be
+// unusable rather than merely unsuccessful.
+func TestConfigWebhookFailsWhenGitHubIsUnusable(t *testing.T) {
+	app := withTestApp(t)
+	gh := newFakeGitHub(t)
+	app.enableGitHubSync(t)
+
+	previous := githubAPIBaseURL
+	githubAPIBaseURL = "http://127.0.0.1:1"
+	require.Equal(t, http.StatusInternalServerError, app.deliverSignedWebhook("{}").status)
+
+	// A body that is not the contents API's shape at all.
+	githubAPIBaseURL = previous
+	gh.serveRaw("not json")
+	require.Equal(t, http.StatusInternalServerError, app.deliverSignedWebhook("{}").status)
+
+	// And one that is, but whose content is not base64.
+	gh.serveRaw(`{"type":"file","content":"!!!","sha":"sha-bad"}`)
+	require.Equal(t, http.StatusInternalServerError, app.deliverSignedWebhook("{}").status)
+}
+
+// A pushed config that does not validate takes a second write path: the apply
+// is thrown away and only the errors are recorded, in a transaction of its own.
+func TestConfigWebhookSurfacesAFailureWhileRecordingErrors(t *testing.T) {
+	app := withTestApp(t)
+	gh := newFakeGitHub(t)
+	app.enableGitHubSync(t)
+
+	gh.serve(`
+general-settings:
+  name: Test Status
+monitors:
+  broken:
+    name: Broken
+    url: not a url
+    method: GET
+    frequency: 60
+    timeout: 5
+    attempts: 2
+`, "sha-broken")
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 120; depth++ {
+		failAtStatement(depth)
+		resp := app.deliverSignedWebhook("{}")
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"the webhook answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusUnprocessableEntity, app.deliverSignedWebhook("{}").status)
+}
