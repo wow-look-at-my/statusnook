@@ -74,7 +74,7 @@ Rather than asserting one case, these replay a whole surface.
 
 ## What is not covered, and why
 
-Coverage is 80.6%; go-toolchain requires 80%. 1,304 of 6,726 statements are
+Coverage is 80.6%; go-toolchain requires 80%. 1,303 of 6,726 statements are
 uncovered, and they are two different problems.
 
 The first needs something this process cannot have:
