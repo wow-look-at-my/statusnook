@@ -14,11 +14,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Ticks the queue every 50ms instead of every ten seconds. go-toolchain gives a
+// single test thirty seconds, and a ten-second tick plus setup leaves too
+// little of it.
+func withFastNotificationLoop(t *testing.T) {
+	t.Helper()
+
+	previous := notificationLoopInterval
+	notificationLoopInterval = 50 * time.Millisecond
+	t.Cleanup(func() { notificationLoopInterval = previous })
+}
+
 // The queue drains through notificationLoop: one row per subscriber per alert
 // message, delivered and then stamped. A slack subscriber is the half that can
 // be driven locally -- an email one needs a real SMTP server.
 func TestNotificationLoopDeliversToASlackSubscriber(t *testing.T) {
 	app := withTestApp(t)
+	withFastNotificationLoop(t)
 	app.useSMTPChannelForAlerts()
 
 	posted := make(chan string, 8)
@@ -51,7 +63,7 @@ func TestNotificationLoopDeliversToASlackSubscriber(t *testing.T) {
 	var body string
 	select {
 	case body = <-posted:
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("the slack subscriber was never called")
 	}
 
@@ -64,7 +76,7 @@ func TestNotificationLoopDeliversToASlackSubscriber(t *testing.T) {
 
 	// Stamped, so the next tick does not deliver it twice.
 	require.Eventually(t, func() bool { return len(app.unsentNotifications()) == 0 },
-		30*time.Second, 100*time.Millisecond, "sent_at was never stamped")
+		10*time.Second, 100*time.Millisecond, "sent_at was never stamped")
 
 	require.NotZero(t, alertID)
 }
@@ -73,6 +85,7 @@ func TestNotificationLoopDeliversToASlackSubscriber(t *testing.T) {
 // tick retries -- stamping it would drop the alert with no record anywhere.
 func TestNotificationLoopRetriesAfterARejectedDelivery(t *testing.T) {
 	app := withTestApp(t)
+	withFastNotificationLoop(t)
 	app.useSMTPChannelForAlerts()
 
 	calls := make(chan struct{}, 8)
@@ -102,7 +115,7 @@ func TestNotificationLoopRetriesAfterARejectedDelivery(t *testing.T) {
 
 	select {
 	case <-calls:
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("the slack subscriber was never called")
 	}
 

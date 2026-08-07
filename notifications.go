@@ -41,8 +41,12 @@ func parseEmailTmpl(name string, markup string) (*template.Template, error) {
 	return tmpl, nil
 }
 
+// How often the queue is drained. A variable so a test can tick it faster than
+// the thirty seconds go-toolchain gives a single test to finish.
+var notificationLoopInterval = 10 * time.Second
+
 func notificationLoop(ctx context.Context, wg *sync.WaitGroup) {
-	ticker := time.NewTicker(time.Second * 10)
+	ticker := time.NewTicker(notificationLoopInterval)
 	defer ticker.Stop()
 	tick := ticker.C
 	for {

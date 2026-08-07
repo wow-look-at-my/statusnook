@@ -120,6 +120,7 @@ func TestMonitorAlertEmailReachesTheMailGroup(t *testing.T) {
 // The alert queue's email half: one row per subscriber, delivered and stamped.
 func TestNotificationLoopMailsAnEmailSubscriber(t *testing.T) {
 	app := withTestApp(t)
+	withFastNotificationLoop(t)
 	smtp := newFakeSMTP(t)
 	app.useFakeSMTPForAlerts(smtp, true)
 
@@ -139,7 +140,7 @@ func TestNotificationLoopMailsAnEmailSubscriber(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool { return len(smtp.messages()) > 0 },
-		30*time.Second, 100*time.Millisecond, "the subscriber was never mailed")
+		10*time.Second, 100*time.Millisecond, "the subscriber was never mailed")
 
 	sent := smtp.messages()[0]
 	require.Equal(t, []string{"sub@example.com"}, sent.to)
@@ -148,5 +149,5 @@ func TestNotificationLoopMailsAnEmailSubscriber(t *testing.T) {
 		"every alert email carries the unsubscribe link the token is minted for")
 
 	require.Eventually(t, func() bool { return len(app.unsentNotifications()) == 0 },
-		30*time.Second, 100*time.Millisecond, "sent_at was never stamped")
+		10*time.Second, 100*time.Millisecond, "sent_at was never stamped")
 }
