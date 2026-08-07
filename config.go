@@ -436,7 +436,9 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
-		respBody, err := io.ReadAll(r.Body)
+		// resp, not r: the request body was drained by PostFormValue long ago,
+		// so this logged an empty string and threw away GitHub's reason.
+		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("postConfigSettings.ReadAllNon200Repo: %s", err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -464,7 +466,15 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 						Please double-check your personal access token, then try again
 					</div>`,
 				))
-
+			} else {
+				// Anything else wrote a 400 with an empty body, so the form
+				// reported nothing at all and looked like it had ignored the save.
+				w.Write([]byte(
+					`<div id="alert" class="alert" hx-swap-oob="true">
+						GitHub answered ` + strconv.Itoa(resp.StatusCode) +
+						` when checking your repository. Please try again.
+					</div>`,
+				))
 			}
 			return
 		}
@@ -497,7 +507,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 
-		respBody, err = io.ReadAll(r.Body)
+		respBody, err = io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("postConfigSettings.ReadAllNon200Config: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -525,7 +535,7 @@ func postConfigSettings(w http.ResponseWriter, r *http.Request) {
 			} else {
 				w.Write([]byte(`
 					<div id="alert" class="alert" hx-swap-oob="true">
-						Your Statusnook configuration could not be found. An unexpcted error occurred.
+						Your Statusnook configuration could not be found. An unexpected error occurred.
 					</div>`,
 				))
 			}

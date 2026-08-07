@@ -24,6 +24,7 @@ type fakeGitHub struct {
 	server  *httptest.Server
 	config  atomic.Pointer[string]
 	sha     atomic.Pointer[string]
+	raw     atomic.Pointer[string]
 	fetches atomic.Int64
 }
 
@@ -42,6 +43,11 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		}
 
 		gh.fetches.Add(1)
+
+		if raw := gh.raw.Load(); raw != nil {
+			w.Write([]byte(*raw))
+			return
+		}
 
 		config, sha := gh.config.Load(), gh.sha.Load()
 		if config == nil {
@@ -70,12 +76,19 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 }
 
 func (g *fakeGitHub) serve(config string, sha string) {
+	g.raw.Store(nil)
 	g.config.Store(&config)
 	g.sha.Store(&sha)
 }
 
 func (g *fakeGitHub) serveMissing() {
 	g.config.Store(nil)
+}
+
+// Answers the contents call with a body of the test's choosing rather than the
+// shape the API actually returns.
+func (g *fakeGitHub) serveRaw(body string) {
+	g.raw.Store(&body)
 }
 
 // The webhook is a public route, so everything before the config fetch is a
