@@ -545,34 +545,6 @@ func adminIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/alerts")
 }
 
-func getSeverity(tx *sql.Tx) (string, error) {
-	const query = `
-		select severity from severity limit 1
-	`
-
-	var severity string
-
-	err := tx.QueryRow(query).Scan(&severity)
-	if err != nil {
-		return severity, fmt.Errorf("getSeverity.QueryRow: %w", err)
-	}
-
-	return severity, nil
-}
-
-func updateSeverity(tx *sql.Tx, severity string) error {
-	const query = `
-		update severity set severity = ?
-	`
-
-	_, err := tx.Exec(query, severity)
-	if err != nil {
-		return fmt.Errorf("updateSeverity.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func update(w http.ResponseWriter, r *http.Request) {
 
 	tmpl, err := parseTmpl("update", updateMarkup)

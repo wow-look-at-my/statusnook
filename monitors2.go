@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -482,61 +480,6 @@ type Monitor struct {
 	Body           sql.NullString
 }
 
-func listMonitors(tx *sql.Tx) ([]Monitor, error) {
-	const query = `
-		select id, slug, name, url, method, frequency, timeout, attempts, request_headers, 
-			body_format, body
-		from monitor
-	`
-
-	monitorListings := []Monitor{}
-
-	rows, err := tx.Query(query)
-	if err != nil {
-		return monitorListings, fmt.Errorf("listMonitors.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var serializedRequestHeaders sql.NullString
-
-		monitor := Monitor{}
-		err = rows.Scan(
-			&monitor.ID,
-			&monitor.Slug,
-			&monitor.Name,
-			&monitor.URL,
-			&monitor.Method,
-			&monitor.Frequency,
-			&monitor.Timeout,
-			&monitor.Attempts,
-			&serializedRequestHeaders,
-			&monitor.BodyFormat,
-			&monitor.Body,
-		)
-		if err != nil {
-			return monitorListings, fmt.Errorf("listMonitors.Scan: %w", err)
-		}
-
-		requestHeaders := map[string]string{}
-		if serializedRequestHeaders.Valid {
-			err = json.Unmarshal([]byte(serializedRequestHeaders.String), &requestHeaders)
-			if err != nil {
-				return monitorListings, fmt.Errorf("listMonitors.Unmarshal: %w", err)
-			}
-		}
-
-		monitor.RequestHeaders = requestHeaders
-		monitorListings = append(monitorListings, monitor)
-	}
-
-	if err := rows.Err(); err != nil {
-		return monitorListings, fmt.Errorf("listMonitors.RowsErr: %w", err)
-	}
-
-	return monitorListings, nil
-}
-
 func monitors(w http.ResponseWriter, r *http.Request) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -590,59 +533,6 @@ func monitors(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func getMonitorByID(tx *sql.Tx, id int) (Monitor, error) {
-	const query = `
-		select
-			id,
-			name,
-			url,
-			method,
-			frequency,
-			timeout,
-			attempts,
-			request_headers,
-			body_format,
-			body
-		from
-			monitor
-		where
-			id = ?
-	`
-
-	monitor := Monitor{}
-
-	var serializedRequestHeaders sql.NullString
-
-	err := tx.QueryRow(query, id).Scan(
-		&monitor.ID,
-		&monitor.Name,
-		&monitor.URL,
-		&monitor.Method,
-		&monitor.Frequency,
-		&monitor.Timeout,
-		&monitor.Attempts,
-		&serializedRequestHeaders,
-		&monitor.BodyFormat,
-		&monitor.Body,
-	)
-	if err != nil {
-		return monitor, fmt.Errorf("getMonitorByID.QueryRow: %w", err)
-	}
-
-	requestHeaders := map[string]string{}
-
-	if serializedRequestHeaders.Valid {
-		err = json.Unmarshal([]byte(serializedRequestHeaders.String), &requestHeaders)
-		if err != nil {
-			return monitor, fmt.Errorf("getMonitorByID.Unmarshal: %w", err)
-		}
-	}
-
-	monitor.RequestHeaders = requestHeaders
-
-	return monitor, nil
 }
 
 type MonitorLog struct {

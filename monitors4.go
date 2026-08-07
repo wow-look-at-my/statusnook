@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -12,61 +11,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
-
-func editMonitor(
-	tx *sql.Tx,
-	id int,
-	name string,
-	url string,
-	method string,
-	frequency int,
-	timeout int,
-	attempts int,
-	requestHeaders sql.NullString,
-	bodyFormat sql.NullString,
-	body sql.NullString,
-) (int, error) {
-	const query = `
-		update monitor set name = ?, url = ?, method = ?, frequency = ?, timeout = ?, 
-			attempts = ?, request_headers = ?, body_format = ?, body = ?
-		where id = ?
-	`
-
-	var monitorID int
-	_, err := tx.Exec(
-		query,
-		name,
-		url,
-		method,
-		frequency,
-		timeout,
-		attempts,
-		requestHeaders,
-		bodyFormat,
-		body,
-		id,
-	)
-	if err != nil {
-		return monitorID, fmt.Errorf("editMonitor.QueryRow: %w", err)
-	}
-
-	return id, nil
-}
-
-func updateMonitorSlug(tx *sql.Tx, old string, new string) (int, error) {
-	const query = `
-		update monitor set slug = ? where slug = ? returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, new, old).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("updateMonitorSlug.QueryRow: %w", err)
-	}
-
-	return id, nil
-}
 
 func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 	if metaConfigFileEnabled.Load() {
@@ -293,19 +237,6 @@ func postEditMonitor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/monitors/"+idParam)
 }
 
-func deleteMonitorByID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from monitor where id = ?
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteMonitorByID.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func deleteMonitor(w http.ResponseWriter, r *http.Request) {
 	// Every create and edit handler has this gate; the four delete handlers
 	// did not, so config-file mode hid the buttons while the routes still
@@ -405,85 +336,4 @@ func getCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func updateMonitorNotificationChannels(tx *sql.Tx, monitorID int, channelIDs []int) error {
-	const deleteQuery = `
-		delete from monitor_notification_channel where monitor_id = ?
-	`
-
-	_, err := tx.Exec(deleteQuery, monitorID)
-	if err != nil {
-		return fmt.Errorf("updateMonitorNotificationChannels.DeleteExec: %w", err)
-	}
-
-	if len(channelIDs) > 0 {
-		const baseInsertQuery = `
-			insert into monitor_notification_channel(monitor_id, notification_channel_id)
-			values
-		`
-
-		insertQuery := baseInsertQuery
-
-		for i := range channelIDs {
-			insertQuery += "(?, ?)"
-
-			if i != len(channelIDs)-1 {
-				insertQuery += ","
-			}
-		}
-
-		params := []any{}
-		for _, v := range channelIDs {
-			params = append(params, monitorID, v)
-		}
-
-		_, err = tx.Exec(insertQuery, params...)
-		if err != nil {
-			return fmt.Errorf("updateMonitorNotificationChannels.InsertExec: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func createMonitor(
-	tx *sql.Tx,
-	slug string,
-	name string,
-	url string,
-	method string,
-	frequency int,
-	timeout int,
-	attempts int,
-	requestHeaders sql.NullString,
-	bodyFormat sql.NullString,
-	body sql.NullString,
-) (int, error) {
-	const query = `
-		insert into
-			monitor(slug, name, url, method, frequency, timeout, attempts, request_headers, 
-				body_format, body)
-			values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning id
-	`
-
-	var monitorID int
-	err := tx.QueryRow(
-		query,
-		slug,
-		name,
-		url,
-		method,
-		frequency,
-		timeout,
-		attempts,
-		requestHeaders,
-		bodyFormat,
-		body,
-	).Scan(&monitorID)
-	if err != nil {
-		return monitorID, fmt.Errorf("createMonitor.QueryRow: %w", err)
-	}
-
-	return monitorID, nil
 }
