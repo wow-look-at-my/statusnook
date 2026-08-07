@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -226,78 +225,6 @@ type UserInvitation struct {
 	CreatedAt time.Time
 }
 
-func listActiveUserInvitations(tx *sql.Tx, minTime time.Time) ([]UserInvitation, error) {
-	const query = `
-		select id, token, created_at from user_invitation
-		where created_at > ?
-		order by id desc
-	`
-
-	invs := []UserInvitation{}
-
-	rows, err := tx.Query(query, minTime)
-	if err != nil {
-		return invs, fmt.Errorf("listActiveUserInvitations.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var inv UserInvitation
-		err := rows.Scan(&inv.ID, &inv.Token, &inv.CreatedAt)
-		if err != nil {
-			return invs, fmt.Errorf("listActiveUserInvitations.Scan: %w", err)
-		}
-
-		invs = append(invs, inv)
-	}
-
-	if err := rows.Err(); err != nil {
-		return invs, fmt.Errorf("listActiveUserInvitations.RowsErr: %w", err)
-	}
-
-	return invs, nil
-}
-
-func validateUserInvitationToken(tx *sql.Tx, token string, minTime time.Time) (int, error) {
-	const query = `
-		select id from user_invitation where token = ? and created_at > ?
-	`
-
-	var id int
-	err := tx.QueryRow(query, token, minTime).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("validateUserInvitationToken.Scan: %w", err)
-	}
-
-	return id, nil
-}
-
-func createUserInvitation(tx *sql.Tx, token string, createdAt time.Time) error {
-	const query = `
-		insert into user_invitation(token, created_at) values(?, ?)
-	`
-
-	_, err := tx.Exec(query, token, createdAt)
-	if err != nil {
-		return fmt.Errorf("createUserInvitation.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func deleteUserInvitation(tx *sql.Tx, id int) error {
-	const query = `
-		delete from user_invitation where id = ?
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteUserInvitation.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func postInviteUser(w http.ResponseWriter, r *http.Request) {
 	tx, err := rwDB.Begin()
 	if err != nil {
@@ -367,126 +294,9 @@ func postDeleteInvite(w http.ResponseWriter, r *http.Request) {
 // credential.
 const sessionLifetime = 30 * 24 * time.Hour
 
-func createSession(tx *sql.Tx, token string, csrfToken string, userID int) error {
-	const query = `
-		insert into session(token, csrf_token, created_at, user_id) values(?, ?, ?, ?)
-	`
-
-	_, err := tx.Exec(query, token, csrfToken, time.Now().UTC(), userID)
-	if err != nil {
-		return fmt.Errorf("createSession.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func validateSession(tx *sql.Tx, token string) (int, string, error) {
-	const query = `
-		select user.id, session.csrf_Token
-		from user
-		left join session on session.user_id = user.id
-		where session.token = ? and session.created_at > ?
-	`
-
-	userID := 0
-	csrfToken := ""
-	err := tx.QueryRow(query, token, time.Now().UTC().Add(-sessionLifetime)).
-		Scan(&userID, &csrfToken)
-	if err != nil {
-		return userID, csrfToken, err
-	}
-
-	return userID, csrfToken, nil
-}
-
 type SettingsUser struct {
 	ID       int
 	Username string
-}
-
-func listUsers(tx *sql.Tx) ([]SettingsUser, error) {
-	const query = `
-		select id, username from user
-	`
-
-	users := []SettingsUser{}
-
-	rows, err := tx.Query(query)
-	if err != nil {
-		return users, fmt.Errorf("listUsers.Query: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var user SettingsUser
-		err := rows.Scan(&user.ID, &user.Username)
-		if err != nil {
-			return users, fmt.Errorf("listUsers.Scan: %w", err)
-		}
-
-		users = append(users, user)
-	}
-
-	if err := rows.Err(); err != nil {
-		return users, fmt.Errorf("listUsers.RowsErr: %w", err)
-	}
-
-	return users, nil
-}
-
-func getPasswordHash(tx *sql.Tx, username string) (string, int, error) {
-	const query = `
-		select password, id
-		from user
-		where username = ?
-	`
-
-	hash := ""
-	userID := 0
-	err := tx.QueryRow(query, username).Scan(&hash, &userID)
-	if err != nil {
-		return hash, userID, fmt.Errorf("getPasswordHash.QueryRow: %w", err)
-	}
-
-	return hash, userID, nil
-}
-
-func getUsernameByID(tx *sql.Tx, id int) (string, error) {
-	const query = `
-		select username from user where id = ?
-	`
-
-	username := ""
-	err := tx.QueryRow(query, id).Scan(&username)
-	if err != nil {
-		return username, fmt.Errorf("getUsernameByID.Scan: %w", err)
-	}
-
-	return username, nil
-}
-
-func deleteSession(tx *sql.Tx, token string) error {
-	const query = `
-		delete from session where token = ?
-	`
-
-	if _, err := tx.Exec(query, token); err != nil {
-		return fmt.Errorf("deleteSession.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func deleteAllSessionsByUserID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from session where user_id = ?
-	`
-
-	if _, err := tx.Exec(query, id); err != nil {
-		return fmt.Errorf("deleteAllSessionsByUserID.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func logout(w http.ResponseWriter, r *http.Request) {
@@ -525,58 +335,4 @@ func logout(w http.ResponseWriter, r *http.Request) {
 	)
 
 	w.Header().Add("HX-Location", "/")
-}
-
-func createUser(tx *sql.Tx, username string, pwHash string) (int, error) {
-	const query = `
-		insert into user(username, password) values(?, ?) returning id
-	`
-
-	userID := 0
-	row := tx.QueryRow(query, username, pwHash)
-	err := row.Scan(&userID)
-	if err != nil {
-		return userID, fmt.Errorf("createUser.Scan: %w", err)
-	}
-
-	return userID, nil
-}
-
-func editUserUsername(tx *sql.Tx, id int, username string) error {
-	const query = `
-		update user set username = ? where id = ?
-	`
-
-	_, err := tx.Exec(query, username, id)
-	if err != nil {
-		return fmt.Errorf("editUserUsername.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func editUser(tx *sql.Tx, id int, username string, pwHash string) error {
-	const query = `
-		update user set username = ?, password = ? where id = ?
-	`
-
-	_, err := tx.Exec(query, username, pwHash, id)
-	if err != nil {
-		return fmt.Errorf("editUser.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func deleteUserByID(tx *sql.Tx, id int) error {
-	const query = `
-		delete from user where id = ?
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("deleteUserByID.Exec: %w", err)
-	}
-
-	return nil
 }

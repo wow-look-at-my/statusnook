@@ -508,35 +508,6 @@ var db *sql.DB
 var rwDB *sql.DB
 var metaName atomicString
 
-func updateMetaValue(tx *sql.Tx, name string, value string) error {
-	const query = `
-		insert into meta(name, value) values(?, ?)
-		on conflict(name) do update set value = excluded.value
-	`
-
-	_, err := tx.Exec(query, name, value)
-	if err != nil {
-		return fmt.Errorf("updateMetaValue.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func getMetaValue(tx *sql.Tx, name string) (string, error) {
-	const query = `
-		select value from meta where name = ?
-	`
-
-	var v string
-
-	err := tx.QueryRow(query, name).Scan(&v)
-	if err != nil {
-		return v, fmt.Errorf("getMetaValue.Scan: %w", err)
-	}
-
-	return v, nil
-}
-
 func generateSlug(name string, slugs map[string]bool) string {
 	pattern := regexp.MustCompile(`[^\p{L}\d]+`)
 
