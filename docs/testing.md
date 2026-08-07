@@ -55,17 +55,20 @@ Three tests replay every route rather than asserting one case:
 
 ## What is not covered, and why
 
-Coverage is 69.6%; go-toolchain requires 80%. The gap is not spread evenly --
-it is five things that need something this process cannot have:
+Coverage is 72.3%; go-toolchain requires 80%. 1,861 of 6,726 statements are
+uncovered, and they are two different problems.
+
+The first needs something this process cannot have:
 
 | Uncovered | Statements | Needs |
 |---|---|---|
 | `main` | 104 | listeners, TLS, signal handling, shutdown |
-| `postSettings` domain branch, `postSetupDomain`, `lookupDomain`, `monitorUnconfirmedDomainLoop`, `attemptCertificateAcquisition` | ~330 | DNS to the root servers and a live ACME server |
+| `postSettings`' domain branch, `postSetupDomain`, `lookupDomain`, `randomNS`, `monitorUnconfirmedDomainLoop`, `attemptCertificateAcquisition` | 333 | DNS answers from the root servers down and a live ACME server |
 | `postUpdate` | 73 | downloading a release binary over the running one and restarting into it |
-| `slackOAuth2Callback` | 64 | slack.com's OAuth endpoint (no seam yet) |
-| `postSubscribeEmail`'s suppression sync | ~85 | api.postmarkapp.com (no seam yet) |
+| `retentionLoop` | 8 | a ticker that only fires once a day |
 
-Roughly 650 statements, near 10% of the module. The Slack and Postmark halves
-could be reached the same way GitHub was, with a base-URL seam; the ACME,
-DNS and self-update paths could not, short of running against real services.
+518 statements, 7.7% of the module. Everything else -- `configWebhook`,
+`postConfigSettings`, `postEditMonitor`, `getSettings` and a long tail of
+handler branches -- is reachable and simply has no test yet. Reaching 80%
+means closing nearly all of that second pile, since the first one alone is
+most of the 20% the gate allows.

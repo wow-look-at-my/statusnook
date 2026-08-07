@@ -21,11 +21,11 @@ embedded SQLite database.
   to the hash the failure prints.
 
 **CI is red on coverage, and the reason is real.** go-toolchain requires 80%
-and this fork is at 69.6%. Every other gate passes. The remaining ~10% is
-`main`, the ACME and DNS domain flow, the binary self-update, the Slack OAuth
-callback and the Postmark suppression sync -- none reachable from a test
-without real services. Do not weaken the gate to dodge it; this paragraph is
-the visible record that it is unmet.
+and this fork is at 72.3%. Every other gate passes. `main`, the ACME and DNS
+domain flow and the binary self-update account for 7.7% on their own and no
+test in this process can reach them; the rest is handler code that simply has
+no test yet. `docs/testing.md` has the breakdown. Do not weaken the gate to
+dodge it; this paragraph is the visible record that it is unmet.
 
 ## Where things live
 
