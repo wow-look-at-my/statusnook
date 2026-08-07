@@ -65,6 +65,14 @@ func applyConfig(tx *sql.Tx, cfgBytes []byte) ([]string, error) {
 			return msgs, fmt.Errorf("applyConfig.DecodeStringNonce: %w", err)
 		}
 
+		// Open PANICS on a nonce of the wrong length rather than returning an
+		// error, and this runs over a config file a push can put in front of
+		// it -- so a truncated secret_ value crashed the request that applied
+		// it, webhook included.
+		if len(nonce) != aesGCM.NonceSize() {
+			continue
+		}
+
 		plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
 		if err != nil {
 			continue

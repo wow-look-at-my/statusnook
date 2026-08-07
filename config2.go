@@ -546,6 +546,13 @@ func postSecret(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Open PANICS on a nonce of the wrong length rather than returning an
+		// error, and the value being decrypted is whatever was pasted in.
+		if len(nonce) != aesGCM.NonceSize() {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
 		plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
