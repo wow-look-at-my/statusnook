@@ -28,3 +28,5 @@ statusnook_linux_*
 .DS_Store
 
 certmagic
+# go-toolchain build outputs
+build/

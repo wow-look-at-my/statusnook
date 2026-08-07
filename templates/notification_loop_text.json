@@ -1,0 +1,44 @@
+
+								{
+									"blocks": [
+										{
+											"type": "header",
+											"text": {
+												"type": "plain_text",
+												"text": "{{.Title}}",
+												"emoji": true
+											}
+										},
+										{
+											"type": "section",
+											"text": {
+												"type": "plain_text",
+												"text": "{{.Content}}",
+												"emoji": true
+											}
+										},
+										{
+											"type": "section",
+											"fields": [
+												{
+													"type": "mrkdwn",
+													"text": "*Affected services*\n{{.Services}}"
+												},
+												{{if eq .AlertType "incident"}}
+												{
+													"type": "mrkdwn",
+													"text": "*Severity*\n{{.Severity}}"
+												}
+												{{end}}
+											]
+										},
+										{
+											"type": "section",
+											"text": {
+												"type": "mrkdwn",
+												"text": "<https://{{.Domain}}|Visit status page>"
+											}
+										}
+									]
+								}
+							
