@@ -1,34 +1,41 @@
 # statusnook
 
 The org's fork of [goksan/Statusnook](https://github.com/goksan/Statusnook).
-Almost the entire application is one file, `main.go` (~19,800 lines): handlers,
-templates as Go string constants, SQL, and the background loops.
+A single Go binary: HTTP handlers, the monitor and notification loops, and an
+embedded SQLite database.
 
 ## Build and CI
 
 - Build: `go build .` -- CGO is required (`mattn/go-sqlite3`).
 - Offline config check: `./statusnook -validate-config path/to/config.yaml`.
-- CI is `wow-look-at-my/go-toolchain@v1` with `cgo: true`. It publishes
-  nothing: `autorelease: false`, and no container image is built. Whatever
-  runs an instance is built and deployed separately; the config that drives
-  one lives in wow-look-at-my/status and is plain YAML any statusnook reads.
+- Regenerate SQL: `go generate ./...` (sqlc is a `tool` dependency, so this
+  needs nothing on `PATH` beyond Go).
+- CI is `wow-look-at-my/go-toolchain@v1` with `cgo: true`, `autorelease: false`
+  and the `generate:` approval hash. It publishes nothing; whatever runs an
+  instance is built and deployed separately, and the config that drives one
+  lives in wow-look-at-my/status as plain YAML any statusnook reads.
 - `id-token: write` is required even with autorelease off -- go-toolchain
   fetches secrets from secret-server over OIDC on every run.
+- Editing the `//go:generate` line in `generate.go` changes its approval hash
+  and fails the build until `generate:` in `.github/workflows/ci.yml` is set
+  to the hash the failure prints.
 
-**CI is red, and the two reasons are real.** go-toolchain caps files at 750
-lines and requires 80% coverage; neither is configurable. This fork carries a
-19,869-line `main.go` and 4.2% coverage. Getting to green means splitting the
-file -- 5,380 of those lines are 134 embedded HTML templates, and
-`applyConfig` (953) and `getEditMonitor` (814) each exceed the cap on their
-own -- and then building a test suite upstream never had. Do not weaken the
-gate to dodge it. `go build`, `go vet ./...` and `go test ./...` all pass.
+**CI is red on coverage, and the reason is real.** go-toolchain requires 80%;
+this fork is at 5.2%, because upstream shipped no tests at all. Do not weaken
+the gate to dodge it -- this paragraph is the visible record that it is unmet.
+The 750-line file cap and every other gate pass.
 
 ## Where things live
 
-- `main.go` -- everything except the pieces below.
-- `validate.go` -- the `-validate-config` entry point.
-- `retention.go` -- pruning for the tables that would otherwise grow forever.
-- `loginlimit.go`, `mailheader.go` -- login throttling; header and JSON escaping.
+- `main.go` -- process entry, flags, routing.
+- Handlers and loops by area: `alerts*.go`, `app*.go`, `config*.go`,
+  `monitors*.go`, `notifications*.go`, `services.go`, `users*.go`,
+  `setup.go`, `domain.go`, `db.go`, `render.go`.
+- `configapply*.go` -- the config-file apply path, one file per section.
+- `templates/*.html` + `templates.go` -- every page template, `//go:embed`ed
+  one constant per file.
+- `sql/*.sql` + `sqlc.yaml` -> `internal/sqlcgen/` -- typed query code. The
+  `*db.go` wrappers adapt it to the app's own types.
 - `schema.sql` -- the schema a **fresh** install gets.
 - `migrations/*.sql` -- applied in filename order to an **existing** install.
 
@@ -36,7 +43,8 @@ gate to dodge it. `go build`, `go vet ./...` and `go test ./...` all pass.
 
 - A schema change goes in **both** `schema.sql` and a migration. A fresh
   install records every migration as skipped and only ever runs `schema.sql`,
-  so a migration-only change never reaches new installs.
+  so a migration-only change never reaches new installs. sqlc reads
+  `schema.sql`, so the migration alone will not make a new column compile.
 - `applyConfig` writes as it validates, deletes included. Any caller must
   discard the transaction when it returns messages -- `configWebhook` did not,
   and a single bad monitor in a pushed config deleted everything the file no

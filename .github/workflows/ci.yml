@@ -24,3 +24,7 @@ jobs:
         with:
           cgo: true
           autorelease: false
+          # Approves generate.go's sqlc directive. go-toolchain pins the exact
+          # command text by hash, so editing the directive fails the build until
+          # this is updated to the hash it prints.
+          generate: 92471f47bccf
