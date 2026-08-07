@@ -78,6 +78,18 @@ func migrationName(fileName string) string {
 	return strings.TrimSuffix(fileName, ".sql")
 }
 
+// The one place the database file and its connection pragmas are spelled out.
+// immediate is for the single writer connection: BEGIN IMMEDIATE takes the
+// write lock up front rather than failing partway through with SQLITE_BUSY.
+func dbDSN(immediate bool) string {
+	dsn := "file:statusnook-data/app.db?_foreign_keys=on&_journal_mode=wal"
+	if immediate {
+		dsn += "&_txlock=immediate"
+	}
+
+	return dsn
+}
+
 func initDB(immediate bool) *sql.DB {
 	// 0700, not ModePerm: app.db holds every live session token, the bcrypt
 	// hashes, the SMTP and Slack credentials, the GitHub PAT, and the AES key
@@ -92,11 +104,7 @@ func initDB(immediate bool) *sql.DB {
 		log.Fatalf("initDB.Chmod: %s", err)
 	}
 
-	dsn := "file:statusnook-data/app.db?_foreign_keys=on&_journal_mode=wal"
-	if immediate {
-		dsn += "&_txlock=immediate"
-	}
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3", dbDSN(immediate))
 	if err != nil {
 		log.Fatalf("initDB.Open: %s", err)
 	}

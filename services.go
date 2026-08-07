@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -203,9 +205,19 @@ func getEditService(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	// Rendering the form anyway put a blank name and helper text in front of
+	// the operator, and saving it wrote those blanks over the real service.
 	svc, err := getServiceByID(tx, id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		log.Printf("getEditService.getServiceByID: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+
+		return
 	}
 
 	err = tx.Commit()
