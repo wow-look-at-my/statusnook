@@ -1,0 +1,45 @@
+
+		<div id="last-checked-status" class="badge{{if not .LastCheckedSuccess}} badge--error{{end}}" hx-swap-oob="true">
+			{{if .LastCheckedSuccess}}
+				<span>OK</span>
+			{{else}}
+				<span>Error</span>
+			{{end}}
+		</div>
+
+		<span id="next-refresh" class="next-refresh" hx-swap-oob="true">
+			{{.NextRefreshMsg}}
+		</span>
+
+		{{range $i, $log := .Logs}}
+			<div 
+				{{if index $.TimeIDs $log.ID}}id="{{index $.TimeIDs $log.ID}}"{{end}}
+				{{if eq $i 0}}
+					hx-get="/admin/monitors/{{$.MonitorID}}/poll?before={{$log.ID}}&date={{$.Date}}" 
+					hx-trigger="load delay:{{$.RefreshDelay}}s"
+					hx-target="this"
+					hx-swap="outerHTML"
+				{{end}}
+			>
+				<span>{{$log.StartedAt}}</span>
+				<span>{{$log.Latency}}</span>
+				{{if eq $log.Result "error"}}
+					<span class="badge{{if ge $log.ResponseCode.Int64 400}} badge--error{{end}}">
+						{{$log.ResponseCode.Int64}}
+					</span>
+				{{end}}
+
+				{{if eq $log.Result "success"}}
+					<span class="badge">
+						{{$log.ResponseCode.Int64}}
+					</span>
+				{{end}}
+
+				{{if eq $log.Result "timeout"}}
+					<span class="badge badge--error">
+						TIMEOUT
+					</span>
+				{{end}}
+			</div>
+		{{end}}
+	

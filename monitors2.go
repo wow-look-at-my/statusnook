@@ -1,0 +1,577 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mholt/acmez/acme"
+)
+
+func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
+	scheduler := newMonitorScheduler(wg)
+
+	// NewTicker, not Tick: time.Tick leaks its ticker and its goroutine, and
+	// these loops do exit -- on ctx.Done, and monitorUnconfirmedDomainLoop
+	// returns on its own once the domain resolves.
+	ticker := time.NewTicker(time.Millisecond * 500)
+	defer ticker.Stop()
+	tick := ticker.C
+
+	for {
+		select {
+		case <-tick:
+			scheduler.checkDueMonitors(ctx)
+		case <-ctx.Done():
+			wg.Done()
+			return
+		}
+	}
+}
+
+// What the monitor loop carries between ticks: which monitors are mid-check,
+// and when each last finished. Split out with the pass below so a test can run
+// one pass directly, with no goroutine and no clock -- a fresh scheduler treats
+// every monitor as due, which is what makes a sweep repeatable.
+type monitorScheduler struct {
+	wg *sync.WaitGroup
+
+	checkoutMu sync.RWMutex
+	checkout   map[int]time.Time
+
+	lastCheckedMu sync.RWMutex
+	lastChecked   map[int]time.Time
+}
+
+func newMonitorScheduler(wg *sync.WaitGroup) *monitorScheduler {
+	return &monitorScheduler{
+		wg:          wg,
+		checkout:    map[int]time.Time{},
+		lastChecked: map[int]time.Time{},
+	}
+}
+
+// Checks every monitor that is due, each on its own goroutine registered with
+// the app WaitGroup: a check outlives the tick that spawned it by up to
+// attempts x timeout, and on shutdown it must not race db.Close() to write its
+// log. The request carries ctx for the same reason.
+func (s *monitorScheduler) checkDueMonitors(ctx context.Context) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("monitorLoop.BeginListMonitors: %s", err)
+		return
+	}
+	defer tx.Rollback()
+
+	monitors, err := listMonitors(tx)
+	if err != nil {
+		log.Printf("monitorLoop.listMonitors: %s", err)
+		return
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Printf("monitorLoop.CommitListMonitors: %s", err)
+		return
+	}
+
+	for _, monitor := range monitors {
+		monitor := monitor
+
+		httpClient := http.Client{
+			Timeout: time.Duration(monitor.Timeout) * time.Second,
+		}
+
+		s.lastCheckedMu.RLock()
+		if time.Since(s.lastChecked[monitor.ID]) <
+			time.Second*time.Duration(monitor.Frequency) {
+			s.lastCheckedMu.RUnlock()
+			continue
+		}
+		s.lastCheckedMu.RUnlock()
+
+		s.checkoutMu.RLock()
+		if _, ok := s.checkout[monitor.ID]; ok {
+			s.checkoutMu.RUnlock()
+			continue
+		}
+		s.checkoutMu.RUnlock()
+
+		s.checkoutMu.Lock()
+		s.checkout[monitor.ID] = time.Now().UTC()
+		s.checkoutMu.Unlock()
+
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+
+			var endedAt time.Time
+
+			defer func() {
+				s.checkoutMu.Lock()
+				delete(s.checkout, monitor.ID)
+				s.checkoutMu.Unlock()
+
+				if endedAt.IsZero() {
+					endedAt = time.Now().UTC()
+				}
+
+				s.lastCheckedMu.Lock()
+				s.lastChecked[monitor.ID] = endedAt
+				s.lastCheckedMu.Unlock()
+			}()
+
+			startedAt := time.Now().UTC()
+
+			var errorMessage sql.NullString
+
+			var resp *http.Response
+			var reqErr error
+			var statusCode sql.NullInt64
+			result := ""
+
+			attempt := 0
+			for attempt = 0; attempt < monitor.Attempts; attempt++ {
+				var body io.Reader
+				if monitor.Body.Valid {
+					body = strings.NewReader(monitor.Body.String)
+				}
+
+				// Carries the app context so a check in flight at SIGTERM
+				// aborts instead of holding shutdown for up to
+				// attempts x timeout.
+				monitorReq, err := http.NewRequestWithContext(
+					ctx,
+					monitor.Method,
+					monitor.URL,
+					body,
+				)
+				if err != nil {
+					log.Printf("monitorLoop.NewRequest: %s", err)
+					break
+				}
+				for k, v := range monitor.RequestHeaders {
+					monitorReq.Header.Add(k, v)
+				}
+
+				// Cleared each attempt: a 500 on attempt 1 followed by a
+				// connection failure on attempt 2 used to log the failure
+				// with attempt 1's status code still attached.
+				statusCode = sql.NullInt64{}
+
+				resp, reqErr = httpClient.Do(monitorReq)
+				if reqErr != nil {
+					continue
+				}
+
+				_, err = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					log.Printf("monitorLoop.Copy: %s", err)
+					break
+				}
+
+				statusCode = sql.NullInt64{
+					Int64: int64(resp.StatusCode),
+					Valid: true,
+				}
+
+				if resp.StatusCode >= 400 {
+					result = "error"
+					continue
+				}
+
+				result = "success"
+
+				break
+			}
+
+			if result != "success" {
+				urlErr := &url.Error{}
+				if ok := errors.As(reqErr, &urlErr); ok {
+					errorMessage = sql.NullString{
+						String: reqErr.Error(),
+						Valid:  true,
+					}
+
+					// Only a genuine timeout is reported as one. A DNS
+					// failure, a refused connection and a TLS error are
+					// all *url.Error too, and calling every one of them
+					// "timeout" sends whoever is debugging the outage
+					// looking in the wrong place.
+					if urlErr.Timeout() || errors.Is(reqErr, context.DeadlineExceeded) {
+						result = "timeout"
+					} else {
+						result = "error"
+					}
+				}
+			}
+
+			// attempt is the loop counter, which stops at the index of
+			// the attempt that succeeded -- so a first-try success was
+			// recorded as 0 attempts while a total failure recorded the
+			// full count. The column is shown to the operator.
+			attemptsMade := attempt
+			if result == "success" {
+				attemptsMade = attempt + 1
+			}
+
+			endedAt = time.Now().UTC()
+
+			tx, err := rwDB.Begin()
+			if err != nil {
+				log.Printf("monitorLoop.BeginMonitorLog: %s", err)
+				return
+			}
+			defer tx.Rollback()
+
+			monitorLogID, err := createMonitorLog(
+				tx,
+				startedAt,
+				endedAt,
+				statusCode.Int64,
+				errorMessage,
+				attemptsMade,
+				result,
+				monitor.ID,
+			)
+			if err != nil {
+				log.Printf("monitorLoop.createMonitorLog: %s", err)
+				return
+			}
+
+			lastChecked, err := getMonitorLogLastChecked(tx, monitor.ID)
+			if err != nil {
+				log.Printf(
+					"monitorLoop.checkNotificationDueByMonitorID: %s",
+					err,
+				)
+				return
+			}
+
+			err = createMonitorLogLastChecked(tx, endedAt, monitor.ID, monitorLogID)
+			if err != nil {
+				log.Printf("monitorLoop.createMonitorLogLastChecked: %s", err)
+				return
+			}
+
+			err = tx.Commit()
+			if err != nil {
+				log.Printf("monitorLoop.CommitMonitorLog: %s", err)
+				return
+			}
+
+			tx, err = db.Begin()
+			if err != nil {
+				log.Printf("monitorLoop.BeginListNotificationsByMonitorID: %s", err)
+				return
+			}
+			defer tx.Rollback()
+
+			channels, err := listNotificationChannelsByMonitorID(tx, monitor.ID)
+			if err != nil {
+				log.Printf("monitorLoop.listNotificationChannelsByMonitorID: %s", err)
+				return
+			}
+
+			err = tx.Commit()
+			if err != nil {
+				log.Printf("monitorLoop.CommitListNotificationChannelsByMonitorID: %s", err)
+				return
+			}
+
+			if len(channels) > 0 {
+				// ID is 0 only when there is no previous check at all
+				// (getMonitorLogLastChecked returns a zero struct on
+				// ErrNoRows). Without this a monitor added for an endpoint
+				// that is ALREADY down has no happy state to transition
+				// from, so it never alerts -- and every later failure looks
+				// like more of the same. The team first hears about the
+				// outage when it recovers.
+				firstCheck := lastChecked.ID == 0
+
+				lastHappy := lastChecked.ResponseCode.Int32 != 0 &&
+					lastChecked.ResponseCode.Int32 < 400
+
+				// The recovery clause needs !firstCheck: with no
+				// previous check there is nothing to have recovered
+				// from, and every monitor added for a healthy
+				// endpoint announced an issue resolved on its first
+				// successful check.
+				if firstCheck && result != "success" ||
+					lastHappy && result != "success" ||
+					!firstCheck && !lastHappy && result == "success" {
+					status := "down"
+					if result == "success" {
+						status = "up"
+					}
+
+					tx, err = db.Begin()
+					if err != nil {
+						log.Printf("monitorLoop.BeginListMailGroupMembersEmailsByMonitorID: %s", err)
+						return
+					}
+					defer tx.Rollback()
+
+					emailAddresses, err := listMailGroupMembersEmailsByMonitorID(
+						tx,
+						monitor.ID,
+					)
+					if err != nil {
+						log.Printf("monitorLoop.listMailGroupMembersEmailsByMonitorID: %s", err)
+						return
+					}
+
+					err = tx.Commit()
+					if err != nil {
+						log.Printf("monitorLoop.CommitListMailGroupMembersEmailsByMonitorID: %s", err)
+						tx.Rollback()
+						return
+					}
+
+					skipEmail := len(emailAddresses) == 0
+
+					for _, channel := range channels {
+						if channel.Type == "smtp" && !skipEmail {
+							err := sendMonitorAlertEmail(
+								monitor,
+								channel,
+								statusCode,
+								result,
+								startedAt,
+								emailAddresses,
+								status,
+							)
+							if err != nil {
+								log.Printf("monitorLoop.sendMonitorAlertEmail: %s", err)
+								continue
+							}
+							skipEmail = true
+						} else if channel.Type == "slack" {
+							err = sendMonitorAlertSlack(
+								monitor,
+								channel,
+								statusCode,
+								startedAt,
+								result,
+								httpClient,
+								status,
+								metaDomain.Load(),
+							)
+							if err != nil {
+								log.Printf("monitorLoop.sendMonitorAlertSlack: %s", err)
+								continue
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
+}
+
+func monitorUnconfirmedDomainLoop(ctx context.Context, wg *sync.WaitGroup) {
+	ticker := time.NewTicker(time.Minute * 1)
+	defer ticker.Stop()
+	tick := ticker.C
+
+	for {
+		if metaUnconfirmedDomain.Load() == "" || metaUnconfirmedDomainProblem.Load() != "" {
+			wg.Done()
+			return
+		}
+
+		select {
+		case <-tick:
+			func() {
+				found, err := lookupDomain(metaUnconfirmedDomain.Load())
+				if err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.lookupDomain: %s", err)
+					return
+				}
+
+				if !found {
+					return
+				}
+
+				err = attemptCertificateAcquisition(ctx, metaUnconfirmedDomain.Load())
+				if err != nil {
+					unconfirmedDomainProblemMsg := "An unexpected error occurred"
+
+					var acmeProblem acme.Problem
+					if errors.As(err, &acmeProblem) {
+						var ok bool
+						unconfirmedDomainProblemMsg, ok = acmeProblemTypeMessages[acmeProblem.Type]
+						if !ok {
+							unconfirmedDomainProblemMsg = "An unhandled error occurred " +
+								acmeProblem.Type
+						}
+					} else {
+						log.Printf("monitorUnconfirmedDomainLoop.attemptCertificateAcquisition: %s", err)
+					}
+
+					tx, err := rwDB.Begin()
+					if err != nil {
+						log.Printf("monitorUnconfirmedDomainLoop.BeginUnconfirmedDomainProblem: %s", err)
+						return
+					}
+					defer tx.Rollback()
+
+					metaUnconfirmedDomainProblem.Store(unconfirmedDomainProblemMsg)
+					err = updateMetaValue(tx, "unconfirmedDomainProblem", metaUnconfirmedDomainProblem.Load())
+					if err != nil {
+						log.Printf("monitorUnconfirmedDomainLoop.UpdateUnconfirmedDomainProblem: %s", err)
+						return
+					}
+
+					if err := tx.Commit(); err != nil {
+						log.Printf("monitorUnconfirmedDomainLoop.CommitUnconfirmedDomainProblem: %s", err)
+						return
+					}
+
+					return
+				}
+
+				tx, err := rwDB.Begin()
+				if err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.Begin: %s", err)
+					return
+				}
+				defer tx.Rollback()
+
+				metaDomain.Store(metaUnconfirmedDomain.Load())
+				err = updateMetaValue(tx, "domain", metaUnconfirmedDomain.Load())
+				if err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueDomain: %s", err)
+					return
+				}
+
+				metaUnconfirmedDomain.Store("")
+				err = updateMetaValue(tx, "unconfirmedDomain", "")
+				if err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomain: %s", err)
+					return
+				}
+
+				metaUnconfirmedDomainProblem.Store("")
+				err = updateMetaValue(tx, "unconfirmedDomainProblem", "")
+				if err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.updateMetaValueUnconfirmedDomainProblem: %s", err)
+					return
+				}
+
+				if err := tx.Commit(); err != nil {
+					log.Printf("monitorUnconfirmedDomainLoop.Commit: %s", err)
+					return
+				}
+			}()
+		case <-ctx.Done():
+			wg.Done()
+			return
+		}
+	}
+}
+
+type StatusnookConfigMonitor struct {
+	Name                 string            `json:"name" yaml:"name"`
+	URL                  string            `json:"url" yaml:"url"`
+	Method               string            `json:"method" yaml:"method"`
+	Frequency            int               `json:"frequency" yaml:"frequency"`
+	Timeout              int               `json:"timeout" yaml:"timeout"`
+	Attempts             int               `json:"attempts" yaml:"attempts"`
+	RequestHeaders       map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	RequestBody          any               `json:"body,omitempty" yaml:"body,omitempty"`
+	NotificationChannels []string          `json:"notification-channels,omitempty" yaml:"notification-channels,omitempty"`
+	MailGroups           []string          `json:"mail-groups,omitempty" yaml:"mail-groups,omitempty"`
+}
+
+type Monitor struct {
+	ID             int
+	Slug           string
+	Name           string
+	URL            string
+	Method         string
+	Frequency      int
+	Timeout        int
+	Attempts       int
+	RequestHeaders map[string]string
+	BodyFormat     sql.NullString
+	Body           sql.NullString
+}
+
+func monitors(w http.ResponseWriter, r *http.Request) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("monitors.Begin: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	monitors, err := listMonitors(tx)
+	if err != nil {
+		log.Printf("monitors.listMonitors: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	lastCheckedLogs, err := listAllMonitorLogLastChecked(tx)
+	if err != nil {
+		log.Printf("monitors.listAllMonitorLogLastChecked: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	monitorHappy := make(map[int]bool, len(lastCheckedLogs))
+	for _, v := range lastCheckedLogs {
+		monitorHappy[v.ID] = v.ResponseCode.Int32 != 0 && v.ResponseCode.Int32 < 400
+	}
+
+	tmpl, err := parseTmpl("monitors", monitorsMarkup)
+	if err != nil {
+		log.Printf("monitors.parseTmpl: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = tmpl.Execute(
+		w,
+		struct {
+			Monitors     []Monitor
+			MonitorHappy map[int]bool
+			Ctx          pageCtx
+		}{
+
+			Monitors:     monitors,
+			MonitorHappy: monitorHappy,
+			Ctx:          getPageCtx(r),
+		},
+	)
+	if err != nil {
+		log.Printf("monitors.Execute: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+type MonitorLog struct {
+	ID           int
+	StartedAt    time.Time
+	EndedAt      time.Time
+	ResponseCode sql.NullInt64
+	ErrorMessage sql.NullString
+	Attempts     int
+	Result       string
+	MonitorID    int
+}
+
+// monitorPollLimit caps the poll handler's query. High enough that a normal
+// poll never notices; low enough that a crafted cursor cannot ask for a day.
+const monitorPollLimit = 500

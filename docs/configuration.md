@@ -173,6 +173,12 @@ discover them was to push a config that broke them:
 | `monitors.<key>.frequency` | `10`, `30`, `60` (seconds) |
 | `monitors.<key>.timeout` | `5`, `10`, `15` (seconds) |
 | `monitors.<key>.attempts` | `1`, `2`, `3` |
+| `notification-channels.<key>.type` | `smtp`, `slack` |
+
+An SMTP channel on `smtp.postmarkapp.com` must also set
+`misc.pm-transactional` and `misc.pm-broadcast`. Postmark routes on the
+message stream and Statusnook sends that header for this host either way, so a
+channel without them has every alert refused at delivery.
 
 Every key -- `monitors.<key>`, `services.<key>`, `mail-groups.<key>`,
 `notification-channels.<key>` -- must be lower-case letters, digits and
