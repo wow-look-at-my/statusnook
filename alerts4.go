@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -69,24 +68,6 @@ func getAddAlertMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func createAlertMessage(tx *sql.Tx, alertID int, content string) (int, error) {
-	const query = `
-		insert into
-			alert_message(content, created_at, alert_id)
-		values(?, ?, ?)
-		returning id
-	`
-
-	var id int
-
-	err := tx.QueryRow(query, content, time.Now().UTC(), alertID).Scan(&id)
-	if err != nil {
-		return id, fmt.Errorf("createAlertMessage.Scan: %w", err)
-	}
-
-	return id, nil
-}
-
 func postAddAlertMessage(w http.ResponseWriter, r *http.Request) {
 	idParam := chi.URLParam(r, "id")
 
@@ -128,19 +109,6 @@ func postAddAlertMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("HX-Location", "/admin/alerts/"+idParam)
-}
-
-func deleteAlertMessageByID(tx *sql.Tx, alertID int, messageID int) error {
-	const query = `
-		delete from alert_message where alert_id = ? and id = ?
-	`
-
-	_, err := tx.Exec(query, alertID, messageID)
-	if err != nil {
-		return fmt.Errorf("deleteAlertMessageByID.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func deleteAlertMessage(w http.ResponseWriter, r *http.Request) {
@@ -258,24 +226,6 @@ func getEditAlertMessage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func editAlertMessage(tx *sql.Tx, alertID int, messageID int, content string) error {
-	const query = `
-		update alert_message 
-		set 
-			content = ?,
-			last_updated_at = ? 
-		where 
-			alert_id = ? and id = ?
-	`
-
-	_, err := tx.Exec(query, content, time.Now().UTC(), alertID, messageID)
-	if err != nil {
-		return fmt.Errorf("editAlertMessage.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func postEditAlertMessage(w http.ResponseWriter, r *http.Request) {

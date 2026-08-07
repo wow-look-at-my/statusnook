@@ -1,8 +1,6 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -87,87 +85,6 @@ func getCreateAlert(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-}
-
-func createAlert(
-	tx *sql.Tx,
-	title string,
-	services []int,
-	alertType string,
-	severity string,
-) (int, error) {
-	const alertQuery = `
-		insert into alert(title, type, severity, created_at) values(?, ?, ?, ?) returning id
-	`
-
-	alertID := 0
-	err := tx.QueryRow(alertQuery, title, alertType, severity, time.Now().UTC()).Scan(&alertID)
-	if err != nil {
-		return alertID, fmt.Errorf("createAlert.Scan: %w", err)
-	}
-
-	const baseServiceQuery = `
-		insert into alert_service(alert_id, service_id) values
-	`
-
-	serviceQuery := baseServiceQuery
-
-	params := []any{}
-
-	for i, serviceID := range services {
-		serviceQuery += "(?, ?)"
-		if i < len(services)-1 {
-			serviceQuery += ", "
-		}
-		params = append(params, alertID, serviceID)
-	}
-
-	_, err = tx.Exec(serviceQuery, params...)
-	if err != nil {
-		return alertID, fmt.Errorf("createAlert.Exec: %w", err)
-	}
-
-	return alertID, nil
-}
-
-func createAlertMessageNotifications(tx *sql.Tx, createdAt time.Time, alertMessageID int) error {
-	const query = `
-		insert into alert_notification(created_at, alert_subscription_id, alert_message_id)
-		select ?, id, ? from alert_subscription where alert_subscription.active = true
-	`
-
-	_, err := tx.Exec(query, time.Now().UTC(), alertMessageID)
-	if err != nil {
-		return fmt.Errorf("createAlertMessageNotifications.Exec: %w", err)
-	}
-
-	return nil
-}
-
-func updateAlertSentAtByID(tx *sql.Tx, now time.Time, ids []int) error {
-	const baseQuery = `
-		update alert_notification set sent_at = ?
-		where id in(
-	`
-
-	query := baseQuery
-
-	params := []any{time.Now().UTC()}
-	for i, destination := range ids {
-		query += "?"
-		if i < len(ids)-1 {
-			query += ","
-		}
-		params = append(params, destination)
-	}
-	query += ")"
-
-	_, err := tx.Exec(query, params...)
-	if err != nil {
-		return fmt.Errorf("updateAlertSentAtByID.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func postCreateAlert(w http.ResponseWriter, r *http.Request) {
@@ -346,56 +263,6 @@ func getEditAlert(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func editAlert(
-	tx *sql.Tx,
-	id int,
-	title string,
-	services []int,
-	alertType string,
-	severity string,
-) error {
-	const alertQuery = `
-		update alert set title = ?, type = ?, severity = ? where id = ?
-	`
-
-	_, err := tx.Exec(alertQuery, title, alertType, severity, id)
-	if err != nil {
-		return fmt.Errorf("editAlert.Exec: %w", err)
-	}
-
-	const serviceDeleteQuery = `
-		delete from alert_service where alert_id = ?
-	`
-
-	_, err = tx.Exec(serviceDeleteQuery, id)
-	if err != nil {
-		return fmt.Errorf("editAlert.Exec2: %w", err)
-	}
-
-	const baseServiceInsertQuery = `
-		insert into alert_service(alert_id, service_id) values
-	`
-
-	serviceInsertQuery := baseServiceInsertQuery
-
-	params := []any{}
-
-	for i, serviceID := range services {
-		serviceInsertQuery += "(?, ?)"
-		if i < len(services)-1 {
-			serviceInsertQuery += ", "
-		}
-		params = append(params, id, serviceID)
-	}
-
-	_, err = tx.Exec(serviceInsertQuery, params...)
-	if err != nil {
-		return fmt.Errorf("editAlert.Exec3: %w", err)
-	}
-
-	return nil
-}
-
 func postEditAlert(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
@@ -490,19 +357,6 @@ func postEditAlert(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("HX-Location", "/admin/alerts")
 }
 
-func resolveAlert(tx *sql.Tx, id int) error {
-	const query = `
-		update alert set ended_at = ? where id = ?
-	`
-
-	_, err := tx.Exec(query, time.Now().UTC(), id)
-	if err != nil {
-		return fmt.Errorf("resolveAlert.Exec: %w", err)
-	}
-
-	return nil
-}
-
 func postResolveAlert(w http.ResponseWriter, r *http.Request) {
 	idParam := chi.URLParam(r, "id")
 	id, err := strconv.Atoi(idParam)
@@ -561,19 +415,6 @@ func postResolveAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("HX-Location", "/admin/alerts/"+idParam)
-}
-
-func unresolveAlert(tx *sql.Tx, id int) error {
-	const query = `
-		update alert set ended_at = null where id = ?
-	`
-
-	_, err := tx.Exec(query, id)
-	if err != nil {
-		return fmt.Errorf("unresolveAlert.Exec: %w", err)
-	}
-
-	return nil
 }
 
 func postUnresolveAlert(w http.ResponseWriter, r *http.Request) {

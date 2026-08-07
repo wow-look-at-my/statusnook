@@ -35,7 +35,10 @@ The 750-line file cap and every other gate pass.
 - `templates/*.html` + `templates.go` -- every page template, `//go:embed`ed
   one constant per file.
 - `sql/*.sql` + `sqlc.yaml` -> `internal/sqlcgen/` -- typed query code. The
-  `*db.go` wrappers adapt it to the app's own types.
+  `*db.go` wrappers adapt it to the app's own types. Every application query
+  lives here; the only hand-written SQL left is `db.go` (schema bootstrap,
+  migration runner, `pragma_table_info` introspection) and `validate.go`, which
+  are DDL and dynamic identifiers sqlc cannot express.
 - `schema.sql` -- the schema a **fresh** install gets.
 - `migrations/*.sql` -- applied in filename order to an **existing** install.
 
@@ -61,3 +64,7 @@ The 750-line file cap and every other gate pass.
   logging included, for the OS connect timeout.
 - The eleven `.gz` files under `static/` have no uncompressed counterpart.
   Serving them only to gzip clients 404s everyone else.
+- Two sqlc/sqlite footguns, each with a test that fails on it: a multi-byte
+  character anywhere in a `sql/*.sql` file truncates every query after it
+  (`char(N)` instead), and a query mixing `?N` with bare `?` asks sqlite for
+  more parameters than sqlc passes (name every parameter in that query).

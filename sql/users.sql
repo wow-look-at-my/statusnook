@@ -48,3 +48,13 @@ update user set username = ?, password = ? where id = ?;
 
 -- name: DeleteUserByID :exec
 delete from user where id = ?;
+
+-- name: PruneUserInvitations :execrows
+delete from user_invitation where id in (
+    select id from user_invitation where user_invitation.created_at < ? limit ?
+);
+
+-- name: PruneSessions :execrows
+delete from session where id in (
+    select id from session where session.created_at < ? limit ?
+);

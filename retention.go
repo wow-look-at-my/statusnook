@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/goksan/statusnook/internal/sqlcgen"
 )
 
 // Nothing ever deleted from monitor_log or alert_notification. At the minimum
@@ -46,57 +49,64 @@ func retentionLoop(ctx context.Context, wg *sync.WaitGroup) {
 
 func pruneOnce() {
 	now := time.Now().UTC()
+	ctx := context.Background()
 
-	// A session past its lifetime no longer validates, so the row is dead
-	// weight; nothing ever deleted it and the table grew a row per login.
 	// Both are fed by public endpoints and neither was ever deleted from:
 	// pending subscriptions accumulate one row per attempted address, and
 	// invitations outlive the 24h at which they stop being accepted.
-	prune(
-		"pending_email_alert_subscription",
-		`delete from pending_email_alert_subscription where id in (
-			select id from pending_email_alert_subscription where created_at < ? limit ?
-		)`,
-		now.Add(-pendingSubscriptionLifetime),
-	)
+	prune("pending_email_alert_subscription", now.Add(-pendingSubscriptionLifetime),
+		func(q *sqlcgen.Queries, before time.Time) (int64, error) {
+			return q.PrunePendingEmailAlertSubscriptions(
+				ctx,
+				sqlcgen.PrunePendingEmailAlertSubscriptionsParams{
+					CreatedAt: before,
+					Limit:     retentionBatchSize,
+				},
+			)
+		})
 
-	prune(
-		"user_invitation",
-		`delete from user_invitation where id in (
-			select id from user_invitation where created_at < ? limit ?
-		)`,
-		now.Add(-userInvitationLifetime),
-	)
+	prune("user_invitation", now.Add(-userInvitationLifetime),
+		func(q *sqlcgen.Queries, before time.Time) (int64, error) {
+			return q.PruneUserInvitations(ctx, sqlcgen.PruneUserInvitationsParams{
+				CreatedAt: before,
+				Limit:     retentionBatchSize,
+			})
+		})
 
-	prune(
-		"session",
-		`delete from session where id in (
-			select id from session where created_at < ? limit ?
-		)`,
-		now.Add(-sessionLifetime),
-	)
+	// A session past its lifetime no longer validates, so the row is dead
+	// weight; nothing ever deleted it and the table grew a row per login.
+	prune("session", now.Add(-sessionLifetime),
+		func(q *sqlcgen.Queries, before time.Time) (int64, error) {
+			return q.PruneSessions(ctx, sqlcgen.PruneSessionsParams{
+				CreatedAt: before,
+				Limit:     retentionBatchSize,
+			})
+		})
 
-	prune(
-		"monitor_log",
-		`delete from monitor_log where id in (
-			select id from monitor_log where started_at < ? limit ?
-		)`,
-		now.Add(-monitorLogRetention),
-	)
+	prune("monitor_log", now.Add(-monitorLogRetention),
+		func(q *sqlcgen.Queries, before time.Time) (int64, error) {
+			return q.PruneMonitorLogs(ctx, sqlcgen.PruneMonitorLogsParams{
+				StartedAt: before,
+				Limit:     retentionBatchSize,
+			})
+		})
 
 	// Only notifications that were actually delivered. A null sent_at is
 	// still queued, and deleting it would drop the alert silently.
-	prune(
-		"alert_notification",
-		`delete from alert_notification where id in (
-			select id from alert_notification
-			where sent_at is not null and sent_at < ? limit ?
-		)`,
-		now.Add(-alertNotificationRetention),
-	)
+	prune("alert_notification", now.Add(-alertNotificationRetention),
+		func(q *sqlcgen.Queries, before time.Time) (int64, error) {
+			return q.PruneAlertNotifications(ctx, sqlcgen.PruneAlertNotificationsParams{
+				SentAt: sql.NullTime{Time: before, Valid: true},
+				Limit:  retentionBatchSize,
+			})
+		})
 }
 
-func prune(table string, query string, before time.Time) {
+func prune(
+	table string,
+	before time.Time,
+	del func(*sqlcgen.Queries, time.Time) (int64, error),
+) {
 	total := int64(0)
 
 	for {
@@ -106,17 +116,10 @@ func prune(table string, query string, before time.Time) {
 			return
 		}
 
-		result, err := tx.Exec(query, before, retentionBatchSize)
+		affected, err := del(sqlcgen.New(tx), before)
 		if err != nil {
 			tx.Rollback()
 			log.Printf("prune.Exec %s: %s", table, err)
-			return
-		}
-
-		affected, err := result.RowsAffected()
-		if err != nil {
-			tx.Rollback()
-			log.Printf("prune.RowsAffected %s: %s", table, err)
 			return
 		}
 

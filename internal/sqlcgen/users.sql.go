@@ -213,6 +213,44 @@ func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 	return items, nil
 }
 
+const pruneSessions = `-- name: PruneSessions :execrows
+delete from session where id in (
+    select id from session where session.created_at < ? limit ?
+)
+`
+
+type PruneSessionsParams struct {
+	CreatedAt time.Time
+	Limit     int64
+}
+
+func (q *Queries) PruneSessions(ctx context.Context, arg PruneSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneSessions, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const pruneUserInvitations = `-- name: PruneUserInvitations :execrows
+delete from user_invitation where id in (
+    select id from user_invitation where user_invitation.created_at < ? limit ?
+)
+`
+
+type PruneUserInvitationsParams struct {
+	CreatedAt time.Time
+	Limit     int64
+}
+
+func (q *Queries) PruneUserInvitations(ctx context.Context, arg PruneUserInvitationsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneUserInvitations, arg.CreatedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const validateSession = `-- name: ValidateSession :one
 select
     user.id, session.csrf_token

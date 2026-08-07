@@ -376,6 +376,70 @@ func (q *Queries) ListMailGroupMembersEmailsByMonitorID(ctx context.Context, mon
 	return items, nil
 }
 
+const listMonitorLogs = `-- name: ListMonitorLogs :many
+select id, started_at, ended_at, response_code, error_message, attempts, result, monitor_id
+from monitor_log
+where monitor_id = ?1
+    and id < ?2
+    and id >= ?3
+    and started_at >= ?4 and started_at < ?5
+order by id desc
+limit ?6
+`
+
+type ListMonitorLogsParams struct {
+	MonitorID int64
+	After     int64
+	Before    int64
+	DayStart  time.Time
+	DayEnd    time.Time
+	RowLimit  int64
+}
+
+// The cursor bounds are always applied; the caller widens them to the id range
+// itself when a page has no cursor. Testing them with `? is null or ...` would
+// make sqlc emit a numbered placeholder for the repeat and an anonymous one for
+// everything else, and sqlite then counts more parameters than sqlc passes.
+// limit is -1 for "no limit", which is how sqlite spells it.
+func (q *Queries) ListMonitorLogs(ctx context.Context, arg ListMonitorLogsParams) ([]MonitorLog, error) {
+	rows, err := q.db.QueryContext(ctx, listMonitorLogs,
+		arg.MonitorID,
+		arg.After,
+		arg.Before,
+		arg.DayStart,
+		arg.DayEnd,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MonitorLog{}
+	for rows.Next() {
+		var i MonitorLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.StartedAt,
+			&i.EndedAt,
+			&i.ResponseCode,
+			&i.ErrorMessage,
+			&i.Attempts,
+			&i.Result,
+			&i.MonitorID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMonitors = `-- name: ListMonitors :many
 select
     id, slug, name, url, method, frequency, timeout, attempts,
@@ -467,6 +531,25 @@ func (q *Queries) ListNotificationChannelsByMonitorID(ctx context.Context, monit
 		return nil, err
 	}
 	return items, nil
+}
+
+const pruneMonitorLogs = `-- name: PruneMonitorLogs :execrows
+delete from monitor_log where id in (
+    select id from monitor_log where monitor_log.started_at < ? limit ?
+)
+`
+
+type PruneMonitorLogsParams struct {
+	StartedAt time.Time
+	Limit     int64
+}
+
+func (q *Queries) PruneMonitorLogs(ctx context.Context, arg PruneMonitorLogsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneMonitorLogs, arg.StartedAt, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const updateMonitorSlug = `-- name: UpdateMonitorSlug :one

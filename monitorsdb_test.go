@@ -79,3 +79,67 @@ func TestMonitorQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, monitors)
 }
+
+// listMonitorLogs was a hand-assembled query string with optional cursor
+// clauses. On sqlc the clauses are always present and a nil parameter means
+// unbounded, so what needs proving is that the bounds still bound: the day
+// window, the after/before cursors, and limit 0 meaning no limit.
+func TestListMonitorLogsBounds(t *testing.T) {
+	withTestDB(t)
+
+	tx, err := rwDB.Begin()
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	monitorID, err := createMonitor(tx, "api", "API", "https://example.com", "GET",
+		60, 5, 1, sql.NullString{}, sql.NullString{}, sql.NullString{})
+	require.NoError(t, err)
+
+	day := time.Date(2026, 3, 4, 0, 0, 0, 0, time.UTC)
+
+	ids := []int{}
+	for i := range 5 {
+		id, err := createMonitorLog(tx, day.Add(time.Duration(i)*time.Hour),
+			day.Add(time.Duration(i)*time.Hour), 200, sql.NullString{}, 1, "success", monitorID)
+		require.NoError(t, err)
+		ids = append(ids, id)
+	}
+
+	// The day before and the day after must not leak in.
+	_, err = createMonitorLog(tx, day.Add(-time.Hour), day.Add(-time.Hour),
+		200, sql.NullString{}, 1, "success", monitorID)
+	require.NoError(t, err)
+	_, err = createMonitorLog(tx, day.Add(24*time.Hour), day.Add(24*time.Hour),
+		200, sql.NullString{}, 1, "success", monitorID)
+	require.NoError(t, err)
+
+	// limit 0 is "no limit", not "no rows".
+	logs, err := listMonitorLogs(tx, monitorID, 0, 0, 0, day)
+	require.NoError(t, err)
+	require.Len(t, logs, 5)
+	require.Equal(t, ids[4], logs[0].ID, "newest first")
+
+	logs, err = listMonitorLogs(tx, monitorID, 2, 0, 0, day)
+	require.NoError(t, err)
+	require.Len(t, logs, 2)
+
+	// after is an exclusive upper bound on id: the next page down.
+	logs, err = listMonitorLogs(tx, monitorID, 0, ids[2], 0, day)
+	require.NoError(t, err)
+	require.Len(t, logs, 2)
+	require.Equal(t, ids[1], logs[0].ID)
+
+	// before is an inclusive lower bound: everything at or above it.
+	logs, err = listMonitorLogs(tx, monitorID, 0, 0, ids[3], day)
+	require.NoError(t, err)
+	require.Len(t, logs, 2)
+	require.Equal(t, ids[4], logs[0].ID)
+
+	// Another monitor's rows are never included.
+	otherID, err := createMonitor(tx, "web", "Web", "https://example.org", "GET",
+		60, 5, 1, sql.NullString{}, sql.NullString{}, sql.NullString{})
+	require.NoError(t, err)
+	logs, err = listMonitorLogs(tx, otherID, 0, 0, 0, day)
+	require.NoError(t, err)
+	require.Empty(t, logs)
+}

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,82 +13,63 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/goksan/statusnook/internal/sqlcgen"
 )
 
-func listMonitorLogs(tx *sql.Tx, monitorID int, limit int, after int, before int, date time.Time) ([]MonitorLog, error) {
-	query := `
-		select
-			id,
-			started_at,
-			ended_at,
-			response_code,
-			error_message,
-			attempts,
-			result,
-			monitor_id
-		from
-			monitor_log
-		where
-			monitor_id = ?
-	`
-
-	if after != 0 {
-		query += "and id < ?"
-	}
-
-	if before != 0 {
-		query += " and id >= ?"
-	}
-
-	query += " and started_at >= ? and started_at < ?"
-
-	query += "\norder by id desc"
-
-	if limit > 0 {
-		query += "\nlimit " + strconv.Itoa(limit)
-	}
-
+func listMonitorLogs(
+	tx *sql.Tx,
+	monitorID int,
+	limit int,
+	after int,
+	before int,
+	date time.Time,
+) ([]MonitorLog, error) {
 	monitorLogs := make([]MonitorLog, 0, limit)
 
-	params := []any{monitorID}
-
+	// An absent cursor widens to the whole id range rather than dropping the
+	// clause: after is an exclusive upper bound, before an inclusive lower one,
+	// and ids are positive.
+	afterParam := int64(math.MaxInt64)
 	if after != 0 {
-		params = append(params, after)
+		afterParam = int64(after)
 	}
-
+	beforeParam := int64(0)
 	if before != 0 {
-		params = append(params, before)
+		beforeParam = int64(before)
 	}
 
-	endOfDay := date.Add(time.Hour * 24)
-	params = append(params, date, endOfDay)
+	// sqlite spells "no limit" as -1.
+	rowLimit := int64(-1)
+	if limit > 0 {
+		rowLimit = int64(limit)
+	}
 
-	rows, err := tx.Query(query, params...)
+	rows, err := sqlcgen.New(tx).ListMonitorLogs(
+		context.Background(),
+		sqlcgen.ListMonitorLogsParams{
+			MonitorID: int64(monitorID),
+			After:     afterParam,
+			Before:    beforeParam,
+			DayStart:  date,
+			DayEnd:    date.Add(time.Hour * 24),
+			RowLimit:  rowLimit,
+		},
+	)
 	if err != nil {
 		return monitorLogs, fmt.Errorf("listMonitorLogs.Query: %w", err)
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		monitorLog := MonitorLog{}
-		err = rows.Scan(
-			&monitorLog.ID,
-			&monitorLog.StartedAt,
-			&monitorLog.EndedAt,
-			&monitorLog.ResponseCode,
-			&monitorLog.ErrorMessage,
-			&monitorLog.Attempts,
-			&monitorLog.Result,
-			&monitorLog.MonitorID,
-		)
-		if err != nil {
-			return monitorLogs, fmt.Errorf("listMonitorLogs.Scan: %w", err)
-		}
-		monitorLogs = append(monitorLogs, monitorLog)
-	}
-
-	if err := rows.Err(); err != nil {
-		return monitorLogs, fmt.Errorf("listMonitorLogs.RowsErr: %w", err)
+	for _, r := range rows {
+		monitorLogs = append(monitorLogs, MonitorLog{
+			ID:           int(r.ID),
+			StartedAt:    r.StartedAt,
+			EndedAt:      r.EndedAt,
+			ResponseCode: r.ResponseCode,
+			ErrorMessage: r.ErrorMessage,
+			Attempts:     int(r.Attempts),
+			Result:       r.Result,
+			MonitorID:    int(r.MonitorID),
+		})
 	}
 
 	return monitorLogs, nil

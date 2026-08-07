@@ -110,3 +110,23 @@ select severity from severity limit 1;
 
 -- name: UpdateSeverity :exec
 update severity set severity = ?;
+
+-- name: ListMonitorLogs :many
+-- The cursor bounds are always applied; the caller widens them to the id range
+-- itself when a page has no cursor. Testing them with `? is null or ...` would
+-- make sqlc emit a numbered placeholder for the repeat and an anonymous one for
+-- everything else, and sqlite then counts more parameters than sqlc passes.
+-- limit is -1 for "no limit", which is how sqlite spells it.
+select id, started_at, ended_at, response_code, error_message, attempts, result, monitor_id
+from monitor_log
+where monitor_id = sqlc.arg('monitor_id')
+    and id < sqlc.arg('after')
+    and id >= sqlc.arg('before')
+    and started_at >= sqlc.arg('day_start') and started_at < sqlc.arg('day_end')
+order by id desc
+limit sqlc.arg('row_limit');
+
+-- name: PruneMonitorLogs :execrows
+delete from monitor_log where id in (
+    select id from monitor_log where monitor_log.started_at < ? limit ?
+);
