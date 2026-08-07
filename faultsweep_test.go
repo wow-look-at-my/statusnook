@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -409,4 +412,66 @@ func TestConfigSettingsSurfacesAFailureAtEveryStatement(t *testing.T) {
 	// swept here rather than with the rest of the GETs.
 	sweepFaults(t, app, http.MethodGet, "/admin/settings", nil)
 	sweepFaults(t, app, http.MethodGet, "/admin/settings/config-settings", nil)
+}
+
+// Polls until the armed fault is reached, or gives up. The loops below run on
+// their own schedule, so unlike a request there is nothing to return from.
+func waitForFault(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if faultFired() {
+			return true
+		}
+
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	return false
+}
+
+// The notification loop does its work inside a closure per tick, so a failed
+// statement ends that tick and the next one starts the batch over. What is
+// under test is that no failure takes the goroutine down with it -- there is no
+// status code here, and a panicking loop would stop the queue draining for as
+// long as the process runs.
+func TestNotificationLoopSurvivesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	withFastNotificationLoop(t)
+	app.useSMTPChannelForAlerts()
+
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+
+	serviceID := app.createService("Web", "the site")
+	app.subscribeSlack(webhook.URL)
+	app.createAlert("Outage", serviceID, "we are looking")
+
+	withFaultyDB(app)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go notificationLoop(ctx, &wg)
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+
+	// The counter runs across ticks rather than resetting per tick, so a depth
+	// past the length of one tick simply lands in a later one. Walking far
+	// enough covers every position within a tick.
+	for depth := int64(1); depth <= 40; depth++ {
+		failAtStatement(depth)
+		fired := waitForFault(1500 * time.Millisecond)
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
 }
