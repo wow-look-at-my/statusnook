@@ -273,9 +273,14 @@ func monitorLoop(ctx context.Context, wg *sync.WaitGroup) {
 							lastHappy := lastChecked.ResponseCode.Int32 != 0 &&
 								lastChecked.ResponseCode.Int32 < 400
 
+							// The recovery clause needs !firstCheck: with no
+							// previous check there is nothing to have recovered
+							// from, and every monitor added for a healthy
+							// endpoint announced an issue resolved on its first
+							// successful check.
 							if firstCheck && result != "success" ||
 								lastHappy && result != "success" ||
-								!lastHappy && result == "success" {
+								!firstCheck && !lastHappy && result == "success" {
 								status := "down"
 								if result == "success" {
 									status = "up"
