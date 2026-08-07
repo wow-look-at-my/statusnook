@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -291,4 +292,115 @@ func TestTheWebhookSurfacesAFailureAtEveryStatement(t *testing.T) {
 
 	failAtStatement(0)
 	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// The suppression sync is a second transaction the subscribe handler only opens
+// when the alert channel is Postmark and statusnook is not managing the list
+// itself, so none of it is reachable from the sweep above.
+func TestSubscribeSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	smtp := newFakeSMTP(t)
+	pm := newFakePostmark(t)
+	app.usePostmarkForAlerts(smtp)
+
+	// Already subscribed, so the handler answers right after the sync instead
+	// of going on to send mail.
+	app.addPendingSubscription("asking@example.com", "tok")
+	require.Equal(t, http.StatusFound, app.post("/subscribe/email/confirm?token=tok", nil).status)
+
+	// One suppressed address with a subscription to deactivate and one without,
+	// so the loop runs both of its branches.
+	app.addPendingSubscription("bounced@example.com", "tok-bounced")
+	require.Equal(t, http.StatusFound,
+		app.post("/subscribe/email/confirm?token=tok-bounced", nil).status)
+	pm.suppress("bounced@example.com", "stranger@example.com")
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 40; depth++ {
+		// Without this only the first iteration runs the sync; the rest are
+		// inside its ten-second window and skip straight past it.
+		allowSuppressionSync()
+
+		failAtStatement(depth)
+		resp := app.post("/subscribe/email", url.Values{"email": {"asking@example.com"}})
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"subscribe answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// A fresh address every iteration, so each one runs the whole path rather than
+// short-circuiting on the pending subscription the previous one left behind.
+func TestSubscribingANewAddressSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	smtp := newFakeSMTP(t)
+	app.useFakeSMTPForAlerts(smtp, true)
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 40; depth++ {
+		failAtStatement(depth)
+		resp := app.post("/subscribe/email",
+			url.Values{"email": {fmt.Sprintf("sub%d@example.com", depth)}})
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"subscribe answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/").status)
+}
+
+// Saving the GitHub half of the config settings talks to the API between its
+// reads and its writes, so its second transaction sits deeper than the sweep's
+// cap and needs a loop of its own.
+func TestConfigSettingsSurfacesAFailureAtEveryStatement(t *testing.T) {
+	app := withTestApp(t)
+	newFakeGitHub(t)
+	t.Cleanup(func() { metaConfigFileEnabled.Store(false) })
+
+	form := url.Values{
+		"config-file":           {"on"},
+		"github-managed":        {"on"},
+		"github-repo-url":       {"https://github.com/example/status"},
+		"github-branch":         {"master"},
+		"github-config-path":    {"config.yaml"},
+		"github-token":          {"ghtoken"},
+		"github-webhook-secret": {webhookSecret},
+	}
+
+	withFaultyDB(app)
+
+	for depth := int64(1); depth <= 80; depth++ {
+		failAtStatement(depth)
+		resp := app.post("/admin/settings/config-settings", form)
+		fired := faultFired()
+		failAtStatement(0)
+
+		if !fired {
+			break
+		}
+
+		require.GreaterOrEqual(t, resp.status, 400,
+			"config settings answered %d with statement %d failed", resp.status, depth)
+	}
+
+	failAtStatement(0)
+	require.Equal(t, http.StatusOK, app.get("/admin/settings/config-settings").status)
 }
